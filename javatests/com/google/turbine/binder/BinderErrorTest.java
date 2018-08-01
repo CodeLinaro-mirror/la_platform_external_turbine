@@ -17,15 +17,15 @@
 package com.google.turbine.binder;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.turbine.testing.TestClassPaths.TURBINE_BOOTCLASSPATH;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Joiner;
+import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.parse.Parser;
 import com.google.turbine.tree.Tree.CompUnit;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
 import org.junit.Test;
@@ -35,9 +35,6 @@ import org.junit.runners.Parameterized.Parameters;
 
 @RunWith(Parameterized.class)
 public class BinderErrorTest {
-
-  private static final ImmutableList<Path> BOOTCLASSPATH =
-      ImmutableList.of(Paths.get(System.getProperty("java.home")).resolve("lib/rt.jar"));
 
   @Parameters
   public static Iterable<Object[]> parameters() {
@@ -49,7 +46,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:2: error: symbol not found NoSuch",
+          "<>:2: error: could not resolve NoSuch",
           "public class A extends NoSuch {",
           "                       ^",
         }
@@ -64,7 +61,7 @@ public class BinderErrorTest {
         },
         // TODO(cushon): we'd prefer the caret at NoSuch instead of A
         {
-          "<>:4: error: symbol not found NoSuch", //
+          "<>:4: error: symbol not found a.A$NoSuch", //
           "class B extends A.NoSuch {",
           "                ^",
         }
@@ -76,7 +73,7 @@ public class BinderErrorTest {
           "class B extends A<NoSuch> {}",
         },
         {
-          "<>:3: error: symbol not found NoSuch",
+          "<>:3: error: could not resolve NoSuch",
           "class B extends A<NoSuch> {}",
           "                  ^",
         }
@@ -87,7 +84,7 @@ public class BinderErrorTest {
           "@Anno(foo=100, bar=200) class Test {}",
         },
         {
-          "<>:2: error: cannot resolve foo", //
+          "<>:2: error: could not resolve foo", //
           "@Anno(foo=100, bar=200) class Test {}",
           "      ^",
         },
@@ -98,7 +95,7 @@ public class BinderErrorTest {
           "@Anno(foo=100, bar=200) class Test {}",
         },
         {
-          "<>:2: error: cannot resolve bar", //
+          "<>:2: error: could not resolve bar", //
           "@Anno(foo=100, bar=200) class Test {}",
           "               ^",
         },
@@ -149,8 +146,8 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:4: error: cycle in class hierarchy: p/OuterExtendsInner$Inner"
-              + " -> p/OuterExtendsInner$Inner",
+          "<>:4: error: cycle in class hierarchy: p.OuterExtendsInner$Inner"
+              + " -> p.OuterExtendsInner$Inner",
           "  public static class Inner extends Foo {}",
           "                                    ^"
         },
@@ -176,7 +173,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:2: error: symbol not found NoSuch", //
+          "<>:2: error: symbol not found java.util.List$NoSuch", //
           "import java.util.List.NoSuch;",
           "       ^"
         },
@@ -189,9 +186,9 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:2: error: symbol not found NoSuch", //
-          "import static java.util.List.NoSuch;",
-          "              ^"
+          "<>:3: error: could not resolve NoSuch", //
+          "public class Test extends NoSuch {",
+          "                          ^"
         },
       },
       {
@@ -202,7 +199,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:3: error: symbol not found NoSuchOther",
+          "<>:3: error: could not resolve NoSuchOther",
           "public class Test extends NoSuchOther {",
           "                          ^",
         },
@@ -215,7 +212,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:3: error: symbol not found NoSuchOther",
+          "<>:3: error: could not resolve NoSuchOther",
           "public class Test extends NoSuchOther {",
           "                          ^",
         },
@@ -228,7 +225,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:3: error: symbol not found NoSuchOther",
+          "<>:3: error: could not resolve NoSuchOther",
           "public class Test extends NoSuchOther {",
           "                          ^",
         },
@@ -241,7 +238,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:3: error: symbol not found NoSuchOther",
+          "<>:3: error: could not resolve NoSuchOther",
           "public class Test extends NoSuchOther {",
           "                          ^",
         },
@@ -253,7 +250,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:2: error: java/lang/Object is not an annotation", //
+          "<>:2: error: java.lang.Object is not an annotation", //
           "  @Object int x;",
           "   ^",
         },
@@ -265,7 +262,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:2: error: java/lang/Deprecated is not @Repeatable", //
+          "<>:2: error: java.lang.Deprecated is not @Repeatable", //
           "  @Deprecated @Deprecated int x;",
           "   ^",
         },
@@ -277,7 +274,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:2: error: symbol not found NoSuch.NoSuch", //
+          "<>:2: error: could not resolve NoSuch.NoSuch", //
           "  @NoSuch.NoSuch int x;",
           "   ^",
         },
@@ -289,7 +286,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:2: error: symbol not found NoSuch", //
+          "<>:2: error: symbol not found java.lang.Deprecated$NoSuch", //
           "  @Deprecated.NoSuch int x;",
           "   ^",
         },
@@ -304,7 +301,7 @@ public class BinderErrorTest {
           "}",
         },
         {
-          "<>:5: error: could not evaluate constant expression", //
+          "<>:5: error: could not resolve field NO_SUCH", //
           "  @Anno(value=Test.NO_SUCH) int x;",
           "              ^",
         },
@@ -337,6 +334,75 @@ public class BinderErrorTest {
           "                      ^",
         },
       },
+      {
+        {
+          "class Test {", //
+          "}",
+          "class Test {",
+          "}",
+        },
+        {
+          "<>:3: error: duplicate declaration of Test", //
+          "class Test {",
+          "      ^",
+        },
+      },
+      {
+        {
+          "public class Test {", //
+          "  static class Inner {}",
+          "  static class Inner {}",
+          "}",
+        },
+        {
+          "<>:3: error: duplicate declaration of Test$Inner", //
+          "  static class Inner {}",
+          "               ^",
+        },
+      },
+      {
+        {
+          "import java.util.List;", //
+          "@interface Anno { Class<?> value() default Object.class; }",
+          "@Anno(List.NoSuch.class)",
+          "public class Test {}",
+        },
+        {
+          "<>:3: error: symbol not found java.util.List$NoSuch", //
+          "@Anno(List.NoSuch.class)",
+          "      ^",
+        },
+      },
+      {
+        {
+          "public class Test {", //
+          "  @interface Anno {",
+          "    Class<?>[] value() default Object.class;",
+          "  }",
+          "  @Anno(value={java.util.Map.Entry}) int x;",
+          "}",
+        },
+        {
+          "<>:5: error: could not resolve field Entry", //
+          "  @Anno(value={java.util.Map.Entry}) int x;",
+          "               ^",
+        },
+      },
+      {
+        {
+          "public class Test {", //
+          "  @interface Anno {",
+          "    Class<?>[] value() default Object.class;",
+          "  }",
+          "  @Anno(value={java.lang.Object}) int x;",
+          "}",
+        },
+        {
+          "<>:5: error: could not resolve field Object", //
+          "  @Anno(value={java.lang.Object}) int x;",
+          "               ^",
+        },
+      },
     };
     return Arrays.asList((Object[][]) testCases);
   }
@@ -352,7 +418,11 @@ public class BinderErrorTest {
   @Test
   public void test() throws Exception {
     try {
-      Binder.bind(ImmutableList.of(parseLines(source)), Collections.emptyList(), BOOTCLASSPATH)
+      Binder.bind(
+              ImmutableList.of(parseLines(source)),
+              ClassPathBinder.bindClasspath(Collections.emptyList()),
+              TURBINE_BOOTCLASSPATH,
+              /* moduleVersion=*/ Optional.absent())
           .units();
       fail();
     } catch (TurbineError e) {
@@ -365,6 +435,6 @@ public class BinderErrorTest {
   }
 
   private static String lines(String... lines) {
-    return Joiner.on('\n').join(lines);
+    return Joiner.on(System.lineSeparator()).join(lines);
   }
 }

@@ -67,11 +67,10 @@ public class ParseErrorTest {
     } catch (TurbineError e) {
       assertThat(e.getMessage())
           .isEqualTo(
-              Joiner.on('\n')
-                  .join(
-                      "<>:1: error: unexpected token: void",
-                      "public static void main(String[] args) {}",
-                      "              ^"));
+              lines(
+                  "<>:1: error: unexpected token: void",
+                  "public static void main(String[] args) {}",
+                  "              ^"));
     }
   }
 
@@ -84,11 +83,10 @@ public class ParseErrorTest {
     } catch (TurbineError e) {
       assertThat(e.getMessage())
           .isEqualTo(
-              Joiner.on('\n')
-                  .join(
-                      "<>:1: error: unexpected identifier 'clas'", //
-                      "public clas Test {}",
-                      "       ^"));
+              lines(
+                  "<>:1: error: unexpected identifier 'clas'", //
+                  "public clas Test {}",
+                  "       ^"));
     }
   }
 
@@ -101,11 +99,62 @@ public class ParseErrorTest {
     } catch (TurbineError e) {
       assertThat(e.getMessage())
           .isEqualTo(
-              Joiner.on('\n')
-                  .join(
-                      "<>:2: error: unexpected end of input", //
-                      "",
-                      "^"));
+              lines(
+                  "<>:2: error: unexpected end of input", //
+                  "",
+                  "^"));
     }
+  }
+
+  @Test
+  public void annotationArgument() {
+    String input = "@A(x = System.err.println()) class Test {}\n";
+    try {
+      Parser.parse(input);
+      fail("expected parsing to fail");
+    } catch (TurbineError e) {
+      assertThat(e.getMessage())
+          .isEqualTo(
+              lines(
+                  "<>:1: error: invalid annotation argument", //
+                  "@A(x = System.err.println()) class Test {}",
+                  "                         ^"));
+    }
+  }
+
+  @Test
+  public void dropParens() {
+    String input = "enum E { ONE(";
+    try {
+      Parser.parse(input);
+      fail("expected parsing to fail");
+    } catch (TurbineError e) {
+      assertThat(e.getMessage())
+          .isEqualTo(
+              lines(
+                  "<>:1: error: unexpected end of input", //
+                  "enum E { ONE(",
+                  "            ^"));
+    }
+  }
+
+  @Test
+  public void dropBlocks() {
+    String input = "class T { Object f = new Object() {";
+    try {
+      Parser.parse(input);
+      fail("expected parsing to fail");
+    } catch (TurbineError e) {
+      assertThat(e.getMessage())
+          .isEqualTo(
+              lines(
+                  "<>:1: error: unexpected end of input", //
+                  "class T { Object f = new Object() {",
+                  "                                  ^"));
+    }
+  }
+
+  private static String lines(String... lines) {
+    return Joiner.on(System.lineSeparator()).join(lines);
   }
 }
