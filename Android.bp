@@ -89,7 +89,6 @@ java_library_host {
 
     srcs: [
         "proto/**/*.proto",
-        "android-annotation-stubs/src/**/*.java",
     ],
 
     manifest: "manifest.txt",
