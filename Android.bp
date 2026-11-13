@@ -31,16 +31,15 @@ license {
     ],
 }
 
-java_library_host {
-    name: "turbine",
+// Common properties shared between turbine-core and turbine.
+java_defaults {
+    name: "turbine-defaults",
+    defaults_visibility: ["//visibility:private"],
 
     srcs: [
         "java/**/*.java",
-        "proto/**/*.proto",
-        "android-annotation-stubs/src/**/*.java",
     ],
 
-    manifest: "manifest.txt",
     static_libs: [
         "error_prone_annotations",
         "guava",
@@ -56,13 +55,46 @@ java_library_host {
         "auto_value_memoized_extension_annotations",
     ],
 
-    proto: {
-        type: "full",
-    },
-
     errorprone: {
         javacflags: [
             "-Xep:NoCanIgnoreReturnValueOnClasses:WARN",
         ],
+    },
+}
+
+// Core turbine library for tools (such as Metalava) that embed Turbine's parser,
+// binder, and type model as a library without the CLI entry point (main) or
+// protobuf dependency reducer (deps).
+java_library_host {
+    name: "turbine-core",
+    defaults: ["turbine-defaults"],
+
+    exclude_srcs: [
+        "java/com/google/turbine/deps/**/*.java",
+        "java/com/google/turbine/main/**/*.java",
+    ],
+
+    exported_static_libs: [
+        "guava",
+        "jspecify",
+    ],
+}
+
+// Standalone turbine header compiler used by Soong. This compiles all sources
+// directly via turbine-defaults instead of statically linking turbine-core to
+// avoid serializing host javac compilation steps on the critical build path.
+java_library_host {
+    name: "turbine",
+    defaults: ["turbine-defaults"],
+
+    srcs: [
+        "proto/**/*.proto",
+        "android-annotation-stubs/src/**/*.java",
+    ],
+
+    manifest: "manifest.txt",
+
+    proto: {
+        type: "full",
     },
 }
