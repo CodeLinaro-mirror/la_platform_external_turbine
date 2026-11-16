@@ -70,7 +70,7 @@ public class TurbineDiagnostic {
 
   void initPosition() {
     if (position != -1 && source != null) {
-      var _ = source.lineMap();
+      var unused = source.lineMap();
     }
   }
 
