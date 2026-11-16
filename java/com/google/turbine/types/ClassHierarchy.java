@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-package com.google.turbine.processing;
+package com.google.turbine.types;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
 import com.google.turbine.binder.bound.TypeBoundClass;
 import com.google.turbine.binder.env.CompoundEnv;
 import com.google.turbine.binder.env.Env;
@@ -41,7 +42,7 @@ public class ClassHierarchy {
   private final Map<ClassSymbol, HierarchyNode> cache = new HashMap<>();
   private Env<ClassSymbol, ? extends TypeBoundClass> env;
 
-  ClassHierarchy(Env<ClassSymbol, ? extends TypeBoundClass> env) {
+  public ClassHierarchy(Env<ClassSymbol, ? extends TypeBoundClass> env) {
     this.env = env;
   }
 
@@ -121,7 +122,7 @@ public class ClassHierarchy {
   }
 
   private HierarchyNode get(ClassSymbol sym) {
-    // dont use computeIfAbsent, to support re-entrant lookups
+    // don't use computeIfAbsent, to support re-entrant lookups
     HierarchyNode result = cache.get(sym);
     if (result != null) {
       return result;
@@ -164,7 +165,7 @@ public class ClassHierarchy {
    * <p>The iteration order of the results is undefined, and in particular no guarantees are made
    * about the ordering of sub-types and super-types.
    */
-  public Iterable<ClassSymbol> transitiveSupertypes(ClassSymbol s) {
-    return Iterables.concat(ImmutableList.of(s), get(s).closure());
+  public Set<ClassSymbol> transitiveSupertypes(ClassSymbol s) {
+    return Sets.union(ImmutableSet.of(s), get(s).closure());
   }
 }

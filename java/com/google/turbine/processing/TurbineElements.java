@@ -30,13 +30,13 @@ import com.google.turbine.binder.sym.Symbol;
 import com.google.turbine.model.Const;
 import com.google.turbine.model.TurbineFlag;
 import com.google.turbine.model.TurbineJavadoc;
-import com.google.turbine.model.TurbineVisibility;
 import com.google.turbine.processing.TurbineElement.TurbineExecutableElement;
 import com.google.turbine.processing.TurbineElement.TurbineFieldElement;
 import com.google.turbine.processing.TurbineElement.TurbineNoTypeElement;
 import com.google.turbine.processing.TurbineElement.TurbineTypeElement;
 import com.google.turbine.processing.TurbineTypeMirror.TurbineExecutableType;
 import com.google.turbine.type.AnnoInfo;
+import com.google.turbine.types.Types;
 import java.io.PrintWriter;
 import java.io.Writer;
 import java.lang.reflect.Proxy;
@@ -53,8 +53,6 @@ import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Name;
 import javax.lang.model.element.PackageElement;
 import javax.lang.model.element.TypeElement;
-import javax.lang.model.type.DeclaredType;
-import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Elements;
 import org.jspecify.annotations.Nullable;
 
@@ -245,7 +243,7 @@ public class TurbineElements implements Elements {
       // skip constructors from super-types, because the spec says so
       return false;
     }
-    if (!isVisible(from, packageSymbol(m.sym()), TurbineVisibility.fromAccess(m.info().access()))) {
+    if (!Types.isVisible(from, packageSymbol(m.sym()), m.info().access())) {
       // skip invisible methods in supers
       return false;
     }
@@ -286,27 +284,9 @@ public class TurbineElements implements Elements {
       // always include fields declared in the given type
       return true;
     }
-    if (!isVisible(from, packageSymbol(sym), TurbineVisibility.fromAccess(f.info().access()))) {
+    if (!Types.isVisible(from, packageSymbol(sym), f.info().access())) {
       // skip invisible fields in supers
       return false;
-    }
-    return true;
-  }
-
-  /**
-   * Returns true if an element with the given {@code visibility} and located in package {@code
-   * from} is visible to elements in package {@code to}.
-   */
-  private static boolean isVisible(
-      PackageSymbol from, PackageSymbol to, TurbineVisibility visibility) {
-    switch (visibility) {
-      case PUBLIC, PROTECTED -> {}
-      case PACKAGE -> {
-        return from.equals(to);
-      }
-      case PRIVATE -> {
-        return false;
-      }
     }
     return true;
   }
@@ -392,30 +372,18 @@ public class TurbineElements implements Elements {
         return false;
       }
     }
-    return isVisible(
-        packageSymbol(asSymbol(hider)),
-        packageSymbol(asSymbol(hidden)),
-        TurbineVisibility.fromAccess(access));
+    return Types.isVisible(packageSymbol(asSymbol(hider)), packageSymbol(asSymbol(hidden)), access);
   }
 
   @Override
   public boolean overrides(
       ExecutableElement overrider, ExecutableElement overridden, TypeElement type) {
-    if (!overrider.getSimpleName().contentEquals(overridden.getSimpleName())) {
-      return false;
-    }
-    TypeMirror a = overrider.asType();
-    TypeMirror b = types.asMemberOfInternal((DeclaredType) type.asType(), overridden);
-    if (b == null) {
-      return false;
-    }
-    if (!types.isSubsignature((TurbineExecutableType) a, (TurbineExecutableType) b)) {
-      return false;
-    }
-    return isVisible(
-        packageSymbol(asSymbol(overrider)),
-        packageSymbol(asSymbol(overridden)),
-        TurbineVisibility.fromAccess(((TurbineExecutableElement) overridden).info().access()));
+    return factory
+        .types()
+        .overrides(
+            ((TurbineExecutableElement) overrider).info(),
+            ((TurbineExecutableElement) overridden).info(),
+            (ClassSymbol) asSymbol(type));
   }
 
   @Override

@@ -20,10 +20,8 @@ import static com.google.common.collect.Iterables.getOnlyElement;
 import static java.util.Objects.requireNonNull;
 
 import com.google.common.base.Splitter;
-import com.google.common.base.Supplier;
 import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.turbine.binder.bound.TypeBoundClass;
 import com.google.turbine.binder.bound.TypeBoundClass.FieldInfo;
@@ -75,6 +73,8 @@ import com.google.turbine.type.Type.MethodTy;
 import com.google.turbine.type.Type.PrimTy;
 import com.google.turbine.type.Type.TyVar;
 import com.google.turbine.type.Type.WildTy;
+import com.google.turbine.types.ClassHierarchy;
+import com.google.turbine.types.Types;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -97,7 +97,7 @@ import javax.lang.model.type.TypeMirror;
  */
 public class ModelFactory {
 
-  public Env<ClassSymbol, ? extends TypeBoundClass> env;
+  private Env<ClassSymbol, ? extends TypeBoundClass> env;
 
   private final AtomicInteger round = new AtomicInteger(0);
 
@@ -106,6 +106,11 @@ public class ModelFactory {
     this.tli = tli;
     round.getAndIncrement();
     cha.round(env);
+    this.types = new Types(cha, env);
+  }
+
+  int roundNumber() {
+    return round.get();
   }
 
   private final HashMap<Type, TurbineTypeMirror> typeCache = new HashMap<>();
@@ -122,41 +127,41 @@ public class ModelFactory {
   private final HashMap<CharSequence, ClassSymbol> inferSymbolCache = new HashMap<>();
 
   private final ClassHierarchy cha;
+  private Types types;
 
   private TopLevelIndex tli;
 
-  public ModelFactory(Env<ClassSymbol, ? extends TypeBoundClass> env, TopLevelIndex tli) {
+  /**
+   * The classpath, used to look up members of classpath types that have been shadowed by generated
+   * sources, see {@link #classPathFallback}.
+   */
+  private final Env<ClassSymbol, ? extends TypeBoundClass> classPathEnv;
+
+  public ModelFactory(
+      Env<ClassSymbol, ? extends TypeBoundClass> env,
+      Env<ClassSymbol, ? extends TypeBoundClass> classPathEnv,
+      TopLevelIndex tli) {
     this.env = requireNonNull(env);
+    this.classPathEnv = requireNonNull(classPathEnv);
     this.cha = new ClassHierarchy(env);
     this.tli = requireNonNull(tli);
+    this.types = new Types(cha, env);
+  }
+
+  /**
+   * Returns the {@link com.google.turbine.types.Types} for the current round. A new instance is
+   * created for each round, so callers shouldn't keep it across rounds.
+   *
+   * <p>This is not the {@link javax.lang.model.util.Types} returned by {@code
+   * ProcessingEnvironment.getTypeUtils()}, which is implemented by {@link TurbineTypes} and does
+   * not have this constraint.
+   */
+  public Types types() {
+    return types;
   }
 
   TypeMirror asTypeMirror(Type type) {
     return typeCache.computeIfAbsent(type, this::createTypeMirror);
-  }
-
-  /**
-   * Returns a supplier that memoizes the result of the input supplier.
-   *
-   * <p>It ensures that the results are invalidated after each annotation processing round, to
-   * support computations that depend on information in the current round and which might change in
-   * future, e.g. as additional types are generated.
-   */
-  <T> Supplier<T> memoize(Supplier<T> s) {
-    return new Supplier<T>() {
-      T v;
-      int initializedInRound = -1;
-
-      @Override
-      public T get() {
-        int r = round.get();
-        if (initializedInRound != r) {
-          v = s.get();
-          initializedInRound = r;
-        }
-        return v;
-      }
-    };
   }
 
   /** Creates a {@link TurbineTypeMirror} backed by a {@link Type}. */
@@ -204,7 +209,7 @@ public class ModelFactory {
     return new TurbinePackageType(this, symbol);
   }
 
-  public NullType nullType() {
+  NullType nullType() {
     return new TurbineNullType(this);
   }
 
@@ -299,8 +304,30 @@ public class ModelFactory {
     return env.get(sym);
   }
 
+  /**
+   * Returns the classpath version of a class, or {@code null}.
+   *
+   * <p>If a processor generates a source file for a type that already exists on the classpath, the
+   * generated source shadows the classpath type in later rounds. Processors may still hold elements
+   * for methods of the classpath type that they obtained in earlier rounds. Those methods may not
+   * be present in the generated source, even if it declares the same members as the classpath type:
+   * {@link MethodSymbol}s are identified by their index in the enclosing class, and that differs
+   * between class files and sources, for example if the class has an implicit default constructor.
+   * Those methods are looked up in the classpath version of the type.
+   */
+  private TypeBoundClass classPathFallback(ClassSymbol sym) {
+    return classPathEnv.get(sym);
+  }
+
   MethodInfo getMethodInfo(MethodSymbol method) {
-    TypeBoundClass info = getSymbol(method.owner());
+    MethodInfo result = findMethod(getSymbol(method.owner()), method);
+    if (result == null) {
+      result = findMethod(classPathFallback(method.owner()), method);
+    }
+    return result;
+  }
+
+  private static MethodInfo findMethod(TypeBoundClass info, MethodSymbol method) {
     for (MethodInfo m : info.methods()) {
       if (m.sym().equals(method)) {
         return m;
@@ -341,15 +368,16 @@ public class ModelFactory {
   }
 
   TyVarInfo getTyVarInfo(TyVarSymbol tyVar) {
-    Symbol owner = tyVar.owner();
-    Verify.verifyNotNull(owner); // TODO(cushon): capture variables
-    ImmutableMap<TyVarSymbol, TyVarInfo> tyParams =
-        switch (owner.symKind()) {
-          case METHOD -> getMethodInfo((MethodSymbol) owner).tyParams();
-          case CLASS -> getSymbol((ClassSymbol) owner).typeParameterTypes();
-          default -> throw new AssertionError(owner.symKind());
-        };
-    return tyParams.get(tyVar);
+    if (tyVar.owner() instanceof MethodSymbol method) {
+      // The method may only be present in the classpath version of a shadowed type, see {@link
+      // #classPathFallback}.
+      MethodInfo info = getMethodInfo(method);
+      TyVarInfo result = info.tyParams().get(tyVar);
+      if (result != null) {
+        return result;
+      }
+    }
+    return types.getTyVarInfo(tyVar);
   }
 
   static ClassSymbol enclosingClass(Symbol sym) {
@@ -364,7 +392,7 @@ public class ModelFactory {
     };
   }
 
-  ClassHierarchy cha() {
+  public ClassHierarchy cha() {
     return cha;
   }
 

@@ -25,6 +25,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.OptionalInt;
+import org.jspecify.annotations.Nullable;
 
 /**
  * A structured representation of the javac options used by Turbine.
@@ -174,14 +175,24 @@ public record TurbineJavacOptions(
             } else {
               processorOptions.put(arg, arg);
             }
-          } else if (opt.startsWith("-XDturbine.parallel.min_threshold=")) {
-            String val = opt.substring("-XDturbine.parallel.min_threshold=".length());
-            Integer threshold = Ints.tryParse(val);
-            if (threshold == null) {
-              throw new IllegalArgumentException(
-                  "invalid -XDturbine.parallel.min_threshold value: " + val);
+          } else if (opt.startsWith("-XDturbine.")) {
+            String flag;
+            String value;
+            int idx = opt.indexOf('=');
+            if (idx >= 0) {
+              flag = opt.substring(0, idx);
+              value = opt.substring(idx + 1);
+            } else {
+              flag = opt;
+              value = null;
             }
-            builder.parallelMinThreshold(threshold);
+            switch (flag) {
+              case "-XDturbine.parallel.min_threshold" ->
+                  builder.parallelMinThreshold(parseInteger(flag, value));
+              default ->
+                  throw new IllegalArgumentException(
+                      String.format("unknown Turbine option: %s", flag));
+            }
           } else if (ONE_ARG_FLAGS.contains(opt)) {
             if (it.hasNext()) {
               it.next(); // Skip the argument of this unused option
@@ -195,6 +206,18 @@ public record TurbineJavacOptions(
         .lowerOptions(lowerOptionsBuilder.build())
         .processorOptions(ImmutableMap.copyOf(processorOptions))
         .build();
+  }
+
+  private static int parseInteger(String flag, @Nullable String value) {
+    if (value == null) {
+      throw new IllegalArgumentException(String.format("missing value for %s", flag));
+    }
+    Integer i = Ints.tryParse(value);
+    if (i == null) {
+      throw new IllegalArgumentException(
+          String.format("invalid integer value for %s: %s", flag, value));
+    }
+    return i;
   }
 
   public static TurbineJavacOptions empty() {

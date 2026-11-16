@@ -17,6 +17,7 @@
 package com.google.turbine.processing;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -59,6 +60,7 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -88,6 +90,7 @@ import javax.tools.Diagnostic;
 import javax.tools.FileObject;
 import javax.tools.JavaFileObject;
 import javax.tools.StandardLocation;
+import org.jspecify.annotations.Nullable;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -729,6 +732,79 @@ public class ProcessingIntegrationTest {
     assertThat(messages).contains("[x, y]");
   }
 
+  /**
+   * Records the enclosing type of the type of {@code p.Lib#f} in each round, and generates the
+   * declaration of that type in the first round.
+   */
+  @SupportedAnnotationTypes("*")
+  public static class EnclosingTypeOfGeneratedClassProcessor extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    final List<String> enclosingTypes = new ArrayList<>();
+    private @Nullable DeclaredType fieldType;
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      if (fieldType == null) {
+        TypeElement lib = processingEnv.getElementUtils().getTypeElement("p.Lib");
+        fieldType =
+            (DeclaredType)
+                getOnlyElement(ElementFilter.fieldsIn(lib.getEnclosedElements())).asType();
+        try (Writer writer = processingEnv.getFiler().createSourceFile("p.Gen").openWriter()) {
+          writer.write("package p; public class Gen { public class Inner {} }");
+        } catch (IOException e) {
+          throw new UncheckedIOException(e);
+        }
+      }
+      TypeMirror enclosing = fieldType.getEnclosingType();
+      enclosingTypes.add(enclosing.getKind() + " " + enclosing);
+      return false;
+    }
+  }
+
+  @Test
+  public void enclosingTypeOfGeneratedClass() throws IOException {
+    // `p.Lib` refers to `p.Gen.Inner`, which isn't on the classpath.
+    Map<String, byte[]> library =
+        IntegrationTestSupport.runTurbine(
+            ImmutableMap.of(
+                "Lib.java",
+                "package p; public class Lib { public Gen.Inner f; }",
+                "Gen.java",
+                "package p; public class Gen { public class Inner {} }"),
+            ImmutableList.of());
+    Path libJar = temporaryFolder.newFile("lib.jar").toPath();
+    try (OutputStream os = Files.newOutputStream(libJar);
+        JarOutputStream jos = new JarOutputStream(os)) {
+      jos.putNextEntry(new JarEntry("p/Lib.class"));
+      jos.write(library.get("p/Lib"));
+    }
+
+    EnclosingTypeOfGeneratedClassProcessor processor = new EnclosingTypeOfGeneratedClassProcessor();
+    var _ =
+        Binder.bind(
+            TurbineExecutor.direct(),
+            new TurbineLog(),
+            parseUnit("=== T.java ===", "class T {}"),
+            ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of(libJar)),
+            ProcessorInfo.create(
+                ImmutableList.of(processor),
+                getClass().getClassLoader(),
+                ImmutableMap.of(),
+                SourceVersion.latestSupported()),
+            TestClassPaths.TURBINE_BOOTCLASSPATH,
+            Optional.empty());
+
+    // The enclosing type isn't known until `p.Gen` is generated, and the result from the first
+    // round must not be cached.
+    assertThat(processor.enclosingTypes)
+        .containsExactly("NONE none", "DECLARED p.Gen", "DECLARED p.Gen")
+        .inOrder();
+  }
+
   @Test
   public void missingElementValue() {
     ImmutableList<Tree.CompUnit> units =
@@ -943,6 +1019,72 @@ public class ProcessingIntegrationTest {
     ImmutableList<String> messages =
         log.diagnostics().stream().map(TurbineDiagnostic::message).collect(toImmutableList());
     assertThat(messages).containsExactly("A(ERROR)");
+  }
+
+  @SupportedAnnotationTypes("*")
+  public static class MissingSupertypeProcessor extends AbstractProcessor {
+    @Override
+    public SourceVersion getSupportedSourceVersion() {
+      return SourceVersion.latestSupported();
+    }
+
+    @Override
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+      TypeElement b = processingEnv.getElementUtils().getTypeElement("B");
+      for (TypeMirror supertype : processingEnv.getTypeUtils().directSupertypes(b.asType())) {
+        var _ = processingEnv.getTypeUtils().directSupertypes(supertype);
+      }
+      return false;
+    }
+  }
+
+  @Test
+  public void missingSupertypeInDirectSupertypes() throws IOException {
+    Map<String, byte[]> library =
+        IntegrationTestSupport.runTurbine(
+            ImmutableMap.of(
+                "A.java", //
+                "class A {}",
+                "B.java",
+                "class B extends A {}"),
+            ImmutableList.of());
+    Path libJar = temporaryFolder.newFile("lib.jar").toPath();
+    try (OutputStream os = Files.newOutputStream(libJar);
+        JarOutputStream jos = new JarOutputStream(os)) {
+      // deliberately exclude A.class
+      jos.putNextEntry(new JarEntry("B.class"));
+      jos.write(library.get("B"));
+    }
+
+    ImmutableList<Tree.CompUnit> units =
+        parseUnit(
+            "=== Y.java ===", //
+            "class Y {}");
+
+    TurbineExecutor executor = TurbineExecutor.direct();
+    TurbineLog log = new TurbineLog();
+    ClassPath classPath =
+        ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of(libJar));
+    ProcessorInfo processorInfo =
+        ProcessorInfo.create(
+            ImmutableList.of(new MissingSupertypeProcessor()),
+            getClass().getClassLoader(),
+            ImmutableMap.of(),
+            SourceVersion.latestSupported());
+    TurbineError e =
+        assertThrows(
+            TurbineError.class,
+            () ->
+                Binder.bind(
+                    executor,
+                    log,
+                    units,
+                    classPath,
+                    processorInfo,
+                    TestClassPaths.TURBINE_BOOTCLASSPATH,
+                    Optional.empty()));
+    assertThat(e.diagnostics().stream().map(TurbineDiagnostic::message))
+        .containsExactly("symbol not found A");
   }
 
   @SupportedAnnotationTypes("*")

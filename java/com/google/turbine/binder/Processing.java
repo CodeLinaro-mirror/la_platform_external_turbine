@@ -38,6 +38,7 @@ import com.google.turbine.binder.sym.ClassSymbol;
 import com.google.turbine.binder.sym.Symbol;
 import com.google.turbine.diag.AnnotationProcessingError;
 import com.google.turbine.diag.SourceFile;
+import com.google.turbine.diag.TurbineError;
 import com.google.turbine.diag.TurbineLog;
 import com.google.turbine.options.TurbineJavacOptions;
 import com.google.turbine.parallel.TurbineExecutor;
@@ -92,22 +93,33 @@ public class Processing {
       }
     }
 
+    Env<ClassSymbol, SourceTypeBoundClass> tenv = new SimpleEnv<>(result.units());
+    CompoundEnv<ClassSymbol, TypeBoundClass> env =
+        CompoundEnv.<ClassSymbol, TypeBoundClass>of(result.classPathEnv()).append(tenv);
+
+    ImmutableSet<ClassSymbol> syms = result.units().keySet();
+    Set<ClassSymbol> allSymbols = new HashSet<>(syms);
+
+    ModelFactory factory = new ModelFactory(env, result.classPathEnv(), result.tli());
+
     TurbineFiler filer =
         new TurbineFiler(
             seen,
+            // Types from previous rounds. Types from the current round are tracked by the filer.
+            // This queries names before they are generated, which is safe because inferSymbol
+            // doesn't cache negative results.
+            name -> {
+              ClassSymbol sym = factory.inferSymbol(name);
+              return sym != null && allSymbols.contains(sym);
+            },
             (String input) -> {
-              // TODO(cushon): should annotation processors be allowed to generate code with
+              // TODO(b/566986492): should annotation processors be allowed to generate code with
               // dependencies between source and bytecode, or vice versa?
               // Currently generated classes are not available on the classpath when compiling
               // the compilation sources (including generated sources).
               return classpath.resource(input);
             },
             processorInfo.loader());
-
-    Env<ClassSymbol, SourceTypeBoundClass> tenv = new SimpleEnv<>(result.units());
-    CompoundEnv<ClassSymbol, TypeBoundClass> env =
-        CompoundEnv.<ClassSymbol, TypeBoundClass>of(result.classPathEnv()).append(tenv);
-    ModelFactory factory = new ModelFactory(env, result.tli());
 
     Map<String, byte[]> statistics = new LinkedHashMap<>();
 
@@ -126,6 +138,8 @@ public class Processing {
     for (Processor processor : processorInfo.processors()) {
       try (var unused = timers.start(processor)) {
         processor.init(processingEnv);
+      } catch (TurbineError turbineError) {
+        throw turbineError;
       } catch (Throwable t) {
         throw new AnnotationProcessingError(processor, t, log.diagnostics());
       }
@@ -134,8 +148,6 @@ public class Processing {
     ImmutableMap<Processor, SupportedAnnotationTypes> wanted =
         initializeSupportedAnnotationTypes(processorInfo);
 
-    Set<ClassSymbol> allSymbols = new HashSet<>();
-
     ImmutableList.Builder<CompUnit> units =
         ImmutableList.<CompUnit>builder().addAll(initialSources);
 
@@ -143,13 +155,7 @@ public class Processing {
 
     boolean errorRaised = false;
 
-    while (true) {
-      ImmutableSet<ClassSymbol> syms =
-          Sets.difference(result.units().keySet(), allSymbols).immutableCopy();
-      allSymbols.addAll(syms);
-      if (syms.isEmpty()) {
-        break;
-      }
+    while (!syms.isEmpty()) {
       ImmutableSetMultimap<ClassSymbol, Symbol> allAnnotations = getAllAnnotations(env, syms);
       TurbineRoundEnvironment roundEnv = null;
       for (Map.Entry<Processor, SupportedAnnotationTypes> e : wanted.entrySet()) {
@@ -174,6 +180,8 @@ public class Processing {
             // discard the result of Processor#process because 'claiming' annotations is a bad idea
             // TODO(cushon): consider disallowing this, or reporting a diagnostic
             processor.process(annotations, roundEnv);
+          } catch (TurbineError turbineError) {
+            throw turbineError;
           } catch (Throwable t) {
             throw new AnnotationProcessingError(processor, t, log.diagnostics());
           }
@@ -183,9 +191,7 @@ public class Processing {
       if (files.isEmpty()) {
         break;
       }
-      for (SourceFile file : files) {
-        units.add(Parser.parse(file));
-      }
+      units.addAll(executor.map(ImmutableList.copyOf(files), Parser::parse));
       errorRaised = log.errorRaised();
       if (errorRaised) {
         break;
@@ -203,6 +209,8 @@ public class Processing {
               moduleVersion);
       tenv = new SimpleEnv<>(result.units());
       env = CompoundEnv.<ClassSymbol, TypeBoundClass>of(result.classPathEnv()).append(tenv);
+      syms = Sets.difference(result.units().keySet(), allSymbols).immutableCopy();
+      allSymbols.addAll(syms);
       factory.round(env, result.tli());
     }
 
@@ -219,6 +227,8 @@ public class Processing {
       }
       try (var unused = timers.start(processor)) {
         processor.process(ImmutableSet.of(), roundEnv);
+      } catch (TurbineError turbineError) {
+        throw turbineError;
       } catch (Throwable t) {
         throw new AnnotationProcessingError(processor, t, log.diagnostics());
       }
@@ -229,9 +239,7 @@ public class Processing {
       // processors aren't supposed to generate sources on the final processing round, but javac
       // tolerates it anyway
       // TODO(cushon): consider disallowing this, or reporting a diagnostic
-      for (SourceFile file : files) {
-        units.add(Parser.parse(file));
-      }
+      units.addAll(executor.map(ImmutableList.copyOf(files), Parser::parse));
       result =
           Binder.bind(
               executor,
@@ -246,10 +254,9 @@ public class Processing {
         return null;
       }
     }
-
     if (!filer.generatedClasses().isEmpty()) {
       // add any generated class files to the output
-      // TODO(cushon): consider handling generated classes after each round
+      // TODO(b/566986492): consider handling generated classes after each round
       result = result.withGeneratedClasses(filer.generatedClasses());
     }
     if (!filer.generatedSources().isEmpty()) {
@@ -288,7 +295,6 @@ public class Processing {
           everything, Pattern.compile(Joiner.on('|').join(patterns)));
     }
   }
-
 
   /** Returns a map from annotations present in the compilation to the annotated elements. */
   private static ImmutableSetMultimap<ClassSymbol, Symbol> getAllAnnotations(
