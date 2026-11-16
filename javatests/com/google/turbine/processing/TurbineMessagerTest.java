@@ -16,10 +16,11 @@
 
 package com.google.turbine.processing;
 
+import static com.google.common.collect.Comparators.emptiesFirst;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static java.util.Comparator.comparing;
+import static java.util.Comparator.naturalOrder;
 import static java.util.Objects.requireNonNull;
 import static org.junit.Assert.assertThrows;
 
@@ -35,6 +36,7 @@ import com.google.turbine.diag.SourceFile;
 import com.google.turbine.diag.TurbineDiagnostic;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.lower.IntegrationTestSupport;
+import com.google.turbine.parallel.TurbineExecutor;
 import com.google.turbine.parse.Parser;
 import com.google.turbine.testing.TestClassPaths;
 import com.google.turbine.tree.Tree;
@@ -204,8 +206,8 @@ public class TurbineMessagerTest {
             // sort the diagnostics for nicer test failure messages
             .sorted(
                 comparing(TurbineMessagerTest::shortPath)
-                    .thenComparing(Diagnostic::getLineNumber)
-                    .thenComparing(Diagnostic::getColumnNumber))
+                    .thenComparingLong(Diagnostic::getLineNumber)
+                    .thenComparingLong(Diagnostic::getColumnNumber))
             .map(TurbineMessagerTest::formatDiagnostic)
             .collect(toImmutableList());
 
@@ -219,7 +221,7 @@ public class TurbineMessagerTest {
             TurbineError.class,
             () ->
                 Binder.bind(
-                    newDirectExecutorService(),
+                    TurbineExecutor.direct(),
                     units,
                     ClassPathBinder.bindClasspath(ImmutableList.of()),
                     Processing.ProcessorInfo.create(
@@ -232,16 +234,16 @@ public class TurbineMessagerTest {
     ImmutableList<String> turbineDiagnostics =
         e.diagnostics().stream()
             .sorted(
-                comparing(TurbineDiagnostic::path)
-                    .thenComparing(TurbineDiagnostic::line)
-                    .thenComparing(TurbineDiagnostic::column))
+                comparing(TurbineDiagnostic::path, emptiesFirst(naturalOrder()))
+                    .thenComparingInt(TurbineDiagnostic::line)
+                    .thenComparingInt(TurbineDiagnostic::column))
             .map(TurbineMessagerTest::formatDiagnostic)
             .collect(toImmutableList());
     assertThat(turbineDiagnostics).containsExactlyElementsIn(javacDiagnostics).inOrder();
   }
 
   private static String formatDiagnostic(TurbineDiagnostic d) {
-    return String.format("%s:%s:%s %s", d.path(), d.line(), d.column(), d.message());
+    return String.format("%s:%s:%s %s", d.path().orElse("<>"), d.line(), d.column(), d.message());
   }
 
   private static String formatDiagnostic(Diagnostic<? extends JavaFileObject> d) {

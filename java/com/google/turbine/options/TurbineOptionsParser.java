@@ -50,6 +50,7 @@ public final class TurbineOptionsParser {
   }
 
   private static void parse(TurbineOptions.Builder builder, Deque<String> argumentDeque) {
+    ImmutableList.Builder<String> javacOptsBuilder = ImmutableList.builder();
     while (!argumentDeque.isEmpty()) {
       String next = argumentDeque.removeFirst();
       switch (next) {
@@ -64,11 +65,7 @@ public final class TurbineOptionsParser {
         case "--classpath" -> builder.setClassPath(readList(argumentDeque));
         case "--bootclasspath" -> builder.setBootClassPath(readList(argumentDeque));
         case "--system" -> builder.setSystem(readOne(next, argumentDeque));
-        case "--javacopts" -> {
-          ImmutableList<String> javacOpts = readJavacopts(argumentDeque);
-          builder.setLanguageVersion(LanguageVersion.fromJavacopts(javacOpts));
-          builder.addAllJavacOpts(javacOpts);
-        }
+        case "--javacopts" -> javacOptsBuilder.addAll(readJavacopts(argumentDeque));
         case "--sources" -> builder.setSources(readList(argumentDeque));
         case "--output_deps_proto", "--output_deps" ->
             builder.setOutputDeps(readOne(next, argumentDeque));
@@ -99,7 +96,10 @@ public final class TurbineOptionsParser {
             builder.setGensrcOutput(readOne(next, argumentDeque));
         case "--resource_output" -> builder.setResourceOutput(readOne(next, argumentDeque));
         case "--help" -> builder.setHelp(true);
-        case "--experimental_fix_deps_tool", "--strict_java_deps", "--native_header_output" ->
+        case "--experimental_fix_deps_tool" -> {
+          builder.setExperimentalFixDepsTool(readOne(next, argumentDeque));
+        }
+        case "--strict_java_deps", "--native_header_output" ->
             // accepted (and ignored) for compatibility with JavaBuilder command lines
             readOne(next, argumentDeque);
         case "--post_processor" -> {
@@ -112,6 +112,7 @@ public final class TurbineOptionsParser {
         default -> throw new IllegalArgumentException("unknown option: " + next);
       }
     }
+    builder.setJavacOpts(TurbineJavacOptions.parse(javacOptsBuilder.build()));
   }
 
   /**

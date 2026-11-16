@@ -18,7 +18,6 @@ package com.google.turbine.lower;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.io.MoreFiles.getFileExtension;
-import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static com.google.turbine.testing.TestClassPaths.TURBINE_BOOTCLASSPATH;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
@@ -44,7 +43,8 @@ import com.google.turbine.binder.Binder.BindingResult;
 import com.google.turbine.binder.ClassPath;
 import com.google.turbine.binder.ClassPathBinder;
 import com.google.turbine.diag.SourceFile;
-import com.google.turbine.options.LanguageVersion;
+import com.google.turbine.options.TurbineJavacOptions;
+import com.google.turbine.parallel.TurbineExecutor;
 import com.google.turbine.parse.Parser;
 import com.google.turbine.testing.AsmUtils;
 import com.google.turbine.tree.Tree.CompUnit;
@@ -151,9 +151,9 @@ public final class IntegrationTestSupport {
       for (ClassNode n : remaining.values()) {
         removeUnusedInnerClassAttributes(infos, n, removed);
         makeEnumsNonAbstract(remaining.keySet(), n);
+        removePermittedSubclassesFromEnums(n);
         sortAttributes(n);
         undeprecate(n);
-        removePreviewVersion(n);
       }
       result.addAll(remaining.values());
     }
@@ -256,11 +256,6 @@ public final class IntegrationTestSupport {
         .forEach(f -> f.access &= ~Opcodes.ACC_DEPRECATED);
   }
 
-  // Mask out preview bits from version number
-  private static void removePreviewVersion(ClassNode n) {
-    n.version &= 0xffff;
-  }
-
   private static boolean isDeprecated(List<AnnotationNode> visibleAnnotations) {
     return visibleAnnotations != null
         && visibleAnnotations.stream().anyMatch(a -> a.desc.equals("Ljava/lang/Deprecated;"));
@@ -275,6 +270,14 @@ public final class IntegrationTestSupport {
         });
     if ((n.access & Opcodes.ACC_ENUM) == Opcodes.ACC_ENUM) {
       n.access &= ~Opcodes.ACC_ABSTRACT;
+    }
+  }
+
+  // anonymous enum subclasses classes aren't part of the ABI and are not emitted by turbine,
+  // so the permitted subclass attribute emitted by javac is removed
+  private static void removePermittedSubclassesFromEnums(ClassNode n) {
+    if ((n.access & Opcodes.ACC_ENUM) == Opcodes.ACC_ENUM) {
+      n.permittedSubclasses = null;
     }
   }
 
@@ -325,7 +328,7 @@ public final class IntegrationTestSupport {
         Comparator.comparing((InnerClassNode x) -> x.name)
             .thenComparing(x -> x.outerName)
             .thenComparing(x -> x.innerName)
-            .thenComparing(x -> x.access));
+            .thenComparingInt(x -> x.access));
 
     sortAnnotations(n.visibleAnnotations);
     sortAnnotations(n.invisibleAnnotations);
@@ -588,10 +591,8 @@ public final class IntegrationTestSupport {
       throws IOException {
     BindingResult bound = turbineAnalysis(input, classpath, bootClassPath, moduleVersion);
     return Lower.lowerAll(
-            newDirectExecutorService(),
-            Lower.LowerOptions.builder()
-                .languageVersion(LanguageVersion.fromJavacopts(javacopts))
-                .build(),
+            TurbineExecutor.direct(),
+            TurbineJavacOptions.parse(javacopts).lowerOptions(),
             bound.units(),
             bound.modules(),
             bound.classPathEnv())
@@ -611,7 +612,7 @@ public final class IntegrationTestSupport {
             .collect(toImmutableList());
 
     return Binder.bind(
-        newDirectExecutorService(),
+        TurbineExecutor.direct(),
         units,
         ClassPathBinder.bindClasspath(classpath),
         bootClassPath,

@@ -16,37 +16,49 @@
 
 package com.google.turbine.options;
 
-import com.google.auto.value.AutoValue;
-import com.google.common.collect.ImmutableList;
-import com.google.common.primitives.Ints;
-import java.util.Iterator;
+import com.google.auto.value.AutoBuilder;
 import java.util.OptionalInt;
 import javax.lang.model.SourceVersion;
 
 /**
  * The language version being compiled, corresponding to javac's {@code -source}, {@code -target},
  * and {@code --release} flags.
+ *
+ * @param source The source version.
+ * @param target The target version.
+ * @param release The release version. If set, system APIs will be resolved from the host JDK's
+ *     ct.sym instead of using the provided {@code --bootclasspath}.
  */
-@AutoValue
-public abstract class LanguageVersion {
+public record LanguageVersion(int source, int target, OptionalInt release, boolean preview) {
 
-  /** The source version. */
-  public abstract int source();
+  private static final int MIN_TARGET_VERSION = 8;
 
-  /** The target version. */
-  public abstract int target();
-
-  /**
-   * The release version.
-   *
-   * <p>If set, system APIs will be resolved from the host JDK's ct.sym instead of using the
-   * provided {@code --bootclasspath}.
-   */
-  public abstract OptionalInt release();
+  public LanguageVersion {
+    // Output Java 8 bytecode at minimum, for type annotations
+    target = Math.max(target, MIN_TARGET_VERSION);
+  }
 
   /** The class file major version corresponding to the {@link #target}. */
   public int majorVersion() {
     return target() + 44;
+  }
+
+  /**
+   * Returns true if ACC_STRICT should be emitted on methods. For Java ≥ 17 (after JEP 306), FP is
+   * always strict, and the ACC_STRICT flag is never emitted
+   */
+  public boolean emitStrictfp() {
+    return target() < 17;
+  }
+
+  /** Returns true if sealed classes are supported (Java 17+, JEP 409). */
+  public boolean supportsSealedClasses() {
+    return target() >= 17;
+  }
+
+  /** Returns true if nestmates are supported (Java 11+, JEP 181). */
+  public boolean emitNests() {
+    return target() >= 11;
   }
 
   public SourceVersion sourceVersion() {
@@ -57,77 +69,33 @@ public abstract class LanguageVersion {
     }
   }
 
-  private static LanguageVersion create(int source, int target, OptionalInt release) {
-    return new AutoValue_LanguageVersion(source, target, release);
-  }
-
   /** The default language version. Currently Java 8. */
   public static LanguageVersion createDefault() {
-    return create(DEFAULT, DEFAULT, OptionalInt.empty());
+    return builder().source(DEFAULT).target(DEFAULT).build();
   }
 
-  private static final int DEFAULT = 8;
-
-  /** Returns the effective {@code LanguageVersion} for the given list of javac options. */
-  public static LanguageVersion fromJavacopts(ImmutableList<String> javacopts) {
-    int sourceVersion = DEFAULT;
-    int targetVersion = DEFAULT;
-    OptionalInt release = OptionalInt.empty();
-    Iterator<String> it = javacopts.iterator();
-    while (it.hasNext()) {
-      String option = it.next();
-      switch (option) {
-        case "-source", "--source" -> {
-          if (!it.hasNext()) {
-            throw new IllegalArgumentException(option + " requires an argument");
-          }
-          sourceVersion = parseVersion(it.next());
-          release = OptionalInt.empty();
-        }
-        case "-target", "--target" -> {
-          if (!it.hasNext()) {
-            throw new IllegalArgumentException(option + " requires an argument");
-          }
-          targetVersion = parseVersion(it.next());
-          release = OptionalInt.empty();
-        }
-        case "--release" -> {
-          if (!it.hasNext()) {
-            throw new IllegalArgumentException(option + " requires an argument");
-          }
-          String value = it.next();
-          Integer n = Ints.tryParse(value);
-          if (n == null) {
-            throw new IllegalArgumentException("invalid --release version: " + value);
-          }
-          release = OptionalInt.of(n);
-          sourceVersion = n;
-          targetVersion = n;
-        }
-        default -> {}
-      }
-    }
-    return create(sourceVersion, targetVersion, release);
+  Builder toBuilder() {
+    return new AutoBuilder_LanguageVersion_Builder(this);
   }
 
-  private static int parseVersion(String value) {
-    boolean hasPrefix = value.startsWith("1.");
-    Integer version = Ints.tryParse(hasPrefix ? value.substring("1.".length()) : value);
-    if (version == null || !isValidVersion(version, hasPrefix)) {
-      throw new IllegalArgumentException("invalid -source version: " + value);
-    }
-    return version;
+  static Builder builder() {
+    return new AutoBuilder_LanguageVersion_Builder().source(DEFAULT).target(DEFAULT).preview(false);
   }
 
-  private static boolean isValidVersion(int version, boolean hasPrefix) {
-    if (version < 5) {
-      // the earliest source version supported by JDK 8 is Java 5
-      return false;
-    }
-    if (hasPrefix && version > 10) {
-      // javac supports legacy `1.*` version numbers for source versions up to Java 10
-      return false;
-    }
-    return true;
+  @AutoBuilder
+  interface Builder {
+    Builder source(int source);
+
+    Builder target(int target);
+
+    Builder release(int release);
+
+    Builder release(OptionalInt release);
+
+    Builder preview(boolean preview);
+
+    LanguageVersion build();
   }
+
+  static final int DEFAULT = 8;
 }

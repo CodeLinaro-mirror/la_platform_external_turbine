@@ -109,11 +109,10 @@ public class Pretty implements Tree.Visitor<@Nullable Void, @Nullable Void> {
   public @Nullable Void visitArrTy(Tree.ArrTy arrTy, @Nullable Void input) {
     ImmutableList.Builder<Tree.ArrTy> flat = ImmutableList.builder();
     Tree next = arrTy;
-    do {
-      Tree.ArrTy curr = (Tree.ArrTy) next;
+    while (next instanceof Tree.ArrTy curr) {
       flat.add(curr);
       next = curr.elem();
-    } while (next.kind().equals(Tree.Kind.ARR_TY));
+    }
 
     next.accept(this, null);
     for (Tree.ArrTy dim : flat.build()) {
@@ -523,7 +522,8 @@ public class Pretty implements Tree.Visitor<@Nullable Void, @Nullable Void> {
             DEFAULT,
             TRANSITIVE,
             SEALED,
-            NON_SEALED ->
+            NON_SEALED,
+            VALUE ->
             append(mod.toString()).append(' ');
         case ACC_SUPER,
             VARARGS,

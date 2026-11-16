@@ -17,8 +17,9 @@
 package com.google.turbine.binder;
 
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static com.google.turbine.testing.TestClassPaths.TURBINE_BOOTCLASSPATH;
+import static java.util.Arrays.stream;
+import static java.util.stream.Collectors.joining;
 import static org.junit.Assert.assertThrows;
 
 import com.google.common.base.Joiner;
@@ -26,6 +27,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.turbine.binder.Processing.ProcessorInfo;
 import com.google.turbine.diag.TurbineError;
+import com.google.turbine.parallel.TurbineExecutor;
 import com.google.turbine.parse.Parser;
 import com.google.turbine.tree.Tree.CompUnit;
 import java.util.Arrays;
@@ -1100,6 +1102,48 @@ public class BinderErrorTest {
           "      ^",
         }
       },
+      {
+        {
+          """
+          @interface Anno {
+            NoSuch[] value() default {};
+          }
+          @Anno(NoSuch.class)
+          class T {}
+          """
+        },
+        {
+          """
+          <>:2: error: could not resolve NoSuch
+            NoSuch[] value() default {};
+            ^
+          <>:4: error: could not resolve NoSuch
+          @Anno(NoSuch.class)
+                ^\
+          """
+        }
+      },
+      // Turbine currently tolerates nested types with the same name as their enclosing type.
+      // This is disallowed by JLS 8.1, but so far isn't import to reject in turbine rather than
+      // letting javac reject it in parallel.
+      {
+        {
+          "package a;", //
+          "public class Foo {",
+          "  public interface Foo {}",
+          "  public interface Foo {}",
+          "  public interface Foo {}",
+          "}",
+        },
+        {
+          "<>:4: error: duplicate declaration of a.Foo$Foo",
+          "  public interface Foo {}",
+          "                   ^",
+          "<>:5: error: duplicate declaration of a.Foo$Foo",
+          "  public interface Foo {}",
+          "                   ^",
+        }
+      },
     };
     return Arrays.asList((Object[][]) testCases);
   }
@@ -1120,7 +1164,7 @@ public class BinderErrorTest {
             TurbineError.class,
             () ->
                 Binder.bind(
-                        newDirectExecutorService(),
+                        TurbineExecutor.direct(),
                         ImmutableList.of(parseLines(source)),
                         ClassPathBinder.bindClasspath(ImmutableList.of()),
                         TURBINE_BOOTCLASSPATH,
@@ -1152,7 +1196,7 @@ public class BinderErrorTest {
             TurbineError.class,
             () ->
                 Binder.bind(
-                        newDirectExecutorService(),
+                        TurbineExecutor.direct(),
                         ImmutableList.of(parseLines(source)),
                         ClassPathBinder.bindClasspath(ImmutableList.of()),
                         ProcessorInfo.create(
@@ -1172,6 +1216,6 @@ public class BinderErrorTest {
   }
 
   private static String lines(String... lines) {
-    return Joiner.on(System.lineSeparator()).join(lines);
+    return stream(lines).flatMap(line -> line.lines()).collect(joining(System.lineSeparator()));
   }
 }

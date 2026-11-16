@@ -21,13 +21,11 @@ import static java.util.Objects.requireNonNull;
 import com.google.auto.value.AutoValue;
 import com.google.common.base.Joiner;
 import com.google.common.base.Stopwatch;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSetMultimap;
 import com.google.common.collect.Sets;
-import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.turbine.binder.Binder.BindingResult;
 import com.google.turbine.binder.Binder.Statistics;
 import com.google.turbine.binder.bound.SourceTypeBoundClass;
@@ -38,8 +36,11 @@ import com.google.turbine.binder.env.Env;
 import com.google.turbine.binder.env.SimpleEnv;
 import com.google.turbine.binder.sym.ClassSymbol;
 import com.google.turbine.binder.sym.Symbol;
+import com.google.turbine.diag.AnnotationProcessingError;
 import com.google.turbine.diag.SourceFile;
 import com.google.turbine.diag.TurbineLog;
+import com.google.turbine.options.TurbineJavacOptions;
+import com.google.turbine.parallel.TurbineExecutor;
 import com.google.turbine.parse.Parser;
 import com.google.turbine.processing.ModelFactory;
 import com.google.turbine.processing.TurbineElements;
@@ -69,14 +70,13 @@ import java.util.regex.Pattern;
 import javax.annotation.processing.Processor;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.TypeElement;
-import javax.tools.Diagnostic;
 import org.jspecify.annotations.Nullable;
 
 /** Top level annotation processing logic, see also {@link Binder}. */
 public class Processing {
 
   static @Nullable BindingResult process(
-      ListeningExecutorService executor,
+      TurbineExecutor executor,
       TurbineLog log,
       final ImmutableList<CompUnit> initialSources,
       final ClassPath classpath,
@@ -127,8 +127,7 @@ public class Processing {
       try (Timers.Timer unused = timers.start(processor)) {
         processor.init(processingEnv);
       } catch (Throwable t) {
-        logProcessorCrash(log, processor, t);
-        return null;
+        throw new AnnotationProcessingError(processor, t, log.diagnostics());
       }
     }
 
@@ -176,8 +175,7 @@ public class Processing {
             // TODO(cushon): consider disallowing this, or reporting a diagnostic
             processor.process(annotations, roundEnv);
           } catch (Throwable t) {
-            logProcessorCrash(log, processor, t);
-            return null;
+            throw new AnnotationProcessingError(processor, t, log.diagnostics());
           }
         }
       }
@@ -222,8 +220,7 @@ public class Processing {
       try (Timers.Timer unused = timers.start(processor)) {
         processor.process(ImmutableSet.of(), roundEnv);
       } catch (Throwable t) {
-        logProcessorCrash(log, processor, t);
-        return null;
+        throw new AnnotationProcessingError(processor, t, log.diagnostics());
       }
     }
 
@@ -292,13 +289,6 @@ public class Processing {
     }
   }
 
-  private static void logProcessorCrash(TurbineLog log, Processor processor, Throwable t) {
-    log.diagnostic(
-        Diagnostic.Kind.ERROR,
-        String.format(
-            "An exception occurred in %s:\n%s",
-            processor.getClass().getCanonicalName(), Throwables.getStackTraceAsString(t)));
-  }
 
   /** Returns a map from annotations present in the compilation to the annotated elements. */
   private static ImmutableSetMultimap<ClassSymbol, Symbol> getAllAnnotations(
@@ -384,15 +374,15 @@ public class Processing {
 
   public static ProcessorInfo initializeProcessors(
       SourceVersion sourceVersion,
-      ImmutableList<String> javacopts,
+      TurbineJavacOptions javacopts,
       ImmutableSet<String> processorNames,
       ClassLoader processorLoader) {
-    if (processorNames.isEmpty() || javacopts.contains("-proc:none")) {
+    if (processorNames.isEmpty() || javacopts.procNone()) {
       return ProcessorInfo.empty();
     }
     ImmutableList<Processor> processors = instantiateProcessors(processorNames, processorLoader);
-    ImmutableMap<String, String> processorOptions = processorOptions(javacopts);
-    return ProcessorInfo.create(processors, processorLoader, processorOptions, sourceVersion);
+    return ProcessorInfo.create(
+        processors, processorLoader, javacopts.processorOptions(), sourceVersion);
   }
 
   private static ImmutableList<Processor> instantiateProcessors(
@@ -449,27 +439,6 @@ public class Processing {
       urls[i++] = Paths.get(path).toUri().toURL();
     }
     return urls;
-  }
-
-  public static ImmutableMap<String, String> processorOptions(ImmutableList<String> javacopts) {
-    Map<String, String> result = new LinkedHashMap<>(); // ImmutableMap.Builder rejects duplicates
-    for (String javacopt : javacopts) {
-      if (javacopt.startsWith("-A")) {
-        javacopt = javacopt.substring("-A".length());
-        int idx = javacopt.indexOf('=');
-        String key;
-        String value;
-        if (idx != -1) {
-          key = javacopt.substring(0, idx);
-          value = javacopt.substring(idx + 1);
-        } else {
-          key = javacopt;
-          value = javacopt;
-        }
-        result.put(key, value);
-      }
-    }
-    return ImmutableMap.copyOf(result);
   }
 
   /** Information about any annotation processing performed by this compilation. */

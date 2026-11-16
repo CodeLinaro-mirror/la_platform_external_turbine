@@ -17,7 +17,6 @@
 package com.google.turbine.lower;
 
 import static com.google.common.truth.Truth.assertWithMessage;
-import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static com.google.turbine.testing.TestClassPaths.TURBINE_BOOTCLASSPATH;
 
 import com.google.common.collect.ImmutableList;
@@ -26,6 +25,8 @@ import com.google.common.collect.ImmutableSet;
 import com.google.turbine.binder.Binder;
 import com.google.turbine.binder.Binder.BindingResult;
 import com.google.turbine.binder.ClassPathBinder;
+import com.google.turbine.options.LowerOptions;
+import com.google.turbine.parallel.TurbineExecutor;
 import com.google.turbine.parse.Parser;
 import java.util.Arrays;
 import java.util.List;
@@ -345,7 +346,7 @@ public class RemovePrivateMembersTest {
   public void testPruning() throws Exception {
     BindingResult bound =
         Binder.bind(
-            newDirectExecutorService(),
+            TurbineExecutor.direct(),
             ImmutableList.of(Parser.parse(source)),
             ClassPathBinder.bindClasspath(ImmutableList.of()),
             TURBINE_BOOTCLASSPATH,
@@ -353,8 +354,8 @@ public class RemovePrivateMembersTest {
 
     ImmutableMap<String, byte[]> lowered =
         Lower.lowerAll(
-                newDirectExecutorService(),
-                Lower.LowerOptions.createDefault(),
+                TurbineExecutor.direct(),
+                LowerOptions.createDefault(),
                 bound.units(),
                 bound.modules(),
                 bound.classPathEnv())

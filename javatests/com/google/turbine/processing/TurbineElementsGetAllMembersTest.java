@@ -18,7 +18,6 @@ package com.google.turbine.processing;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static java.util.Objects.requireNonNull;
 
 import com.google.common.base.Joiner;
@@ -33,6 +32,7 @@ import com.google.turbine.binder.sym.ClassSymbol;
 import com.google.turbine.diag.SourceFile;
 import com.google.turbine.lower.IntegrationTestSupport;
 import com.google.turbine.lower.IntegrationTestSupport.TestInput;
+import com.google.turbine.parallel.TurbineExecutor;
 import com.google.turbine.parse.Parser;
 import com.google.turbine.testing.TestClassPaths;
 import com.google.turbine.tree.Tree.CompUnit;
@@ -236,6 +236,29 @@ public class TurbineElementsGetAllMembersTest {
         "  }",
         "}",
       },
+      {
+        // A covariant override inherited through a class + interface diamond: the base-typed f()
+        // reaches Test via the superclass S, and the narrowed override via interface B. Only the
+        // override should survive in getAllMembers.
+        "=== O.java ===",
+        "interface O {}",
+        "=== P.java ===",
+        "interface P extends O {}",
+        "=== A.java ===",
+        "interface A {",
+        "  O f();",
+        "}",
+        "=== B.java ===",
+        "interface B extends A {",
+        "  @Override",
+        "  P f();",
+        "}",
+        "=== S.java ===",
+        "abstract class S implements A {}",
+        "=== Test.java ===", //
+        "abstract class Test extends S implements B {",
+        "}",
+      },
     };
     return Arrays.stream(inputs)
         .map(input -> TestInput.parse(Joiner.on('\n').join(input)))
@@ -268,7 +291,7 @@ public class TurbineElementsGetAllMembersTest {
 
     Binder.BindingResult bound =
         Binder.bind(
-            newDirectExecutorService(),
+            TurbineExecutor.direct(),
             units,
             ClassPathBinder.bindClasspath(ImmutableList.of()),
             TestClassPaths.TURBINE_BOOTCLASSPATH,

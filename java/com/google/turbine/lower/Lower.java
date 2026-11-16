@@ -16,17 +16,13 @@
 
 package com.google.turbine.lower;
 
-import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.turbine.binder.DisambiguateTypeAnnotations.groupRepeated;
-import static java.lang.Math.max;
 import static java.util.Objects.requireNonNull;
 
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.turbine.binder.bound.EnumConstantValue;
 import com.google.turbine.binder.bound.ModuleInfo.ExportInfo;
 import com.google.turbine.binder.bound.ModuleInfo.OpenInfo;
@@ -72,8 +68,8 @@ import com.google.turbine.diag.TurbineLog;
 import com.google.turbine.model.Const;
 import com.google.turbine.model.TurbineFlag;
 import com.google.turbine.model.TurbineTyKind;
-import com.google.turbine.options.LanguageVersion;
-import com.google.turbine.parallel.Parallel;
+import com.google.turbine.options.LowerOptions;
+import com.google.turbine.parallel.TurbineExecutor;
 import com.google.turbine.type.AnnoInfo;
 import com.google.turbine.type.Type;
 import com.google.turbine.type.Type.ArrayTy;
@@ -95,53 +91,6 @@ import org.jspecify.annotations.Nullable;
 /** Lowering from bound classes to bytecode. */
 public class Lower {
 
-  /** Lowering options. */
-  @AutoValue
-  public abstract static class LowerOptions {
-
-    public abstract LanguageVersion languageVersion();
-
-    public abstract boolean emitPrivateFields();
-
-    // TODO: b/496858305 - consider removing this after rolling out the feature
-    public abstract boolean emitAllPrivateMemberClasses();
-
-    public abstract boolean methodParameters();
-
-    public static LowerOptions createDefault() {
-      return builder().build();
-    }
-
-    public static Builder builder() {
-      return new AutoValue_Lower_LowerOptions.Builder()
-          .languageVersion(LanguageVersion.createDefault())
-          .emitPrivateFields(false)
-          .emitAllPrivateMemberClasses(false)
-          .methodParameters(true);
-    }
-
-    /** Builder for {@link LowerOptions}. */
-    @AutoValue.Builder
-    public abstract static class Builder {
-      public abstract Builder languageVersion(LanguageVersion languageVersion);
-
-      public Builder javacOpts(ImmutableList<String> javacOpts) {
-        return emitPrivateFields(javacOpts.contains("-XDturbine.emitPrivateFields"))
-            .emitAllPrivateMemberClasses(
-                javacOpts.contains("-XDturbine.emitAllPrivateMemberClasses"))
-            .methodParameters(!javacOpts.contains("-XDturbine.noMethodParameters"));
-      }
-
-      public abstract Builder emitPrivateFields(boolean emitPrivateFields);
-
-      public abstract Builder emitAllPrivateMemberClasses(boolean emitAllPrivateMemberClasses);
-
-      public abstract Builder methodParameters(boolean methodParameters);
-
-      public abstract LowerOptions build();
-    }
-  }
-
   /** The lowered compilation output. */
   @AutoValue
   public abstract static class Lowered {
@@ -162,51 +111,49 @@ public class Lower {
 
   /** Lowers all given classes to bytecode. */
   public static Lowered lowerAll(
-      ListeningExecutorService executor,
+      TurbineExecutor executor,
       LowerOptions options,
       ImmutableMap<ClassSymbol, SourceTypeBoundClass> units,
       ImmutableList<SourceModuleInfo> modules,
       Env<ClassSymbol, BytecodeBoundClass> classpath) {
     CompoundEnv<ClassSymbol, TypeBoundClass> env =
         CompoundEnv.<ClassSymbol, TypeBoundClass>of(classpath).append(new SimpleEnv<>(units));
-    // Output Java 8 bytecode at minimum, for type annotations
-    int majorVersion = max(options.languageVersion().majorVersion(), 52);
     ImmutableMap<ClassSymbol, SourceTypeBoundClass> pruned =
         RemovePrivateMembers.process(env, units, options);
     TurbineLog log = new TurbineLog();
-    List<ListenableFuture<TaskResult>> futures = new ArrayList<>();
-    for (var entry : pruned.entrySet()) {
-      ClassSymbol sym = entry.getKey();
-      futures.add(
-          executor.submit(
-              () ->
-                  lower(sym.binaryName(), entry.getValue(), env, sym, majorVersion, options, log)));
-    }
-    if (modules.size() == 1) {
-      // single module mode: the module-info.class file is at the root
-      futures.add(
-          executor.submit(
-              () ->
-                  lower("module-info", getOnlyElement(modules), env, majorVersion, options, log)));
-    } else {
-      // multi-module mode: the output module-info.class are in a directory corresponding to their
-      // package
-      for (SourceModuleInfo module : modules) {
-        futures.add(
-            executor.submit(
-                () ->
-                    lower(
-                        module.name().replace('.', '/') + "/module-info",
-                        module,
-                        env,
-                        majorVersion,
-                        options,
-                        log)));
-      }
-    }
+
+    ImmutableList<TaskResult> classResults =
+        executor.map(
+            pruned.entrySet().asList(),
+            entry -> {
+              ClassSymbol sym = entry.getKey();
+              return lower(
+                  sym.binaryName(), entry.getValue(), env, sym, options, log, pruned.keySet());
+            });
+
+    ImmutableList<TaskResult> moduleResults =
+        executor.map(
+            modules,
+            module ->
+                lower(
+                    modules.size() == 1
+                        // single module mode: the module-info.class file is at the root
+                        ? "module-info"
+                        // multi-module mode: the output module-info.class are in a directory
+                        // corresponding to their package
+                        : module.name().replace('.', '/') + "/module-info",
+                    module,
+                    env,
+                    options,
+                    log));
+
     ImmutableMap.Builder<String, byte[]> result = ImmutableMap.builder();
     ImmutableSet.Builder<ClassSymbol> symbols = ImmutableSet.builder();
-    for (TaskResult lowered : Parallel.allAsList(futures)) {
+    for (TaskResult lowered : classResults) {
+      result.put(lowered.name(), lowered.bytes());
+      symbols.addAll(lowered.symbols());
+    }
+    for (TaskResult lowered : moduleResults) {
       result.put(lowered.name(), lowered.bytes());
       symbols.addAll(lowered.symbols());
     }
@@ -220,11 +167,11 @@ public class Lower {
       SourceTypeBoundClass info,
       Env<ClassSymbol, TypeBoundClass> env,
       ClassSymbol sym,
-      int majorVersion,
       LowerOptions lowerOptions,
-      TurbineLog log) {
+      TurbineLog log,
+      Set<ClassSymbol> emitted) {
     Set<ClassSymbol> symbols = new LinkedHashSet<>();
-    byte[] bytes = new Lower(env, log, lowerOptions).lower(info, sym, symbols, majorVersion);
+    byte[] bytes = new Lower(env, log, lowerOptions, emitted).lower(info, sym, symbols);
     return new TaskResult(name, bytes, ImmutableSet.copyOf(symbols));
   }
 
@@ -232,11 +179,10 @@ public class Lower {
       String name,
       SourceModuleInfo module,
       CompoundEnv<ClassSymbol, TypeBoundClass> env,
-      int majorVersion,
       LowerOptions lowerOptions,
       TurbineLog log) {
     Set<ClassSymbol> symbols = new LinkedHashSet<>();
-    byte[] bytes = new Lower(env, log, lowerOptions).lower(module, symbols, majorVersion);
+    byte[] bytes = new Lower(env, log, lowerOptions, null).lower(module, symbols);
     return new TaskResult(name, bytes, ImmutableSet.copyOf(symbols));
   }
 
@@ -244,14 +190,24 @@ public class Lower {
   private final Env<ClassSymbol, TypeBoundClass> env;
   private final TurbineLog log;
   private final LowerOptions lowerOptions;
+  private final @Nullable Set<ClassSymbol> emitted;
 
-  public Lower(Env<ClassSymbol, TypeBoundClass> env, TurbineLog log, LowerOptions lowerOptions) {
+  public Lower(
+      Env<ClassSymbol, TypeBoundClass> env,
+      TurbineLog log,
+      LowerOptions lowerOptions,
+      @Nullable Set<ClassSymbol> emitted) {
     this.env = env;
     this.log = log;
     this.lowerOptions = lowerOptions;
+    this.emitted = emitted;
   }
 
-  private byte[] lower(SourceModuleInfo module, Set<ClassSymbol> symbols, int majorVersion) {
+  public Lower(Env<ClassSymbol, TypeBoundClass> env, TurbineLog log, LowerOptions lowerOptions) {
+    this(env, log, lowerOptions, null);
+  }
+
+  private byte[] lower(SourceModuleInfo module, Set<ClassSymbol> symbols) {
     String name = "module-info";
     ImmutableList<AnnotationInfo> annotations = lowerAnnotations(module.annos());
     ClassFile.ModuleInfo moduleInfo = lowerModule(module);
@@ -270,7 +226,8 @@ public class Lower {
     ClassFile classfile =
         new ClassFile(
             /* access= */ TurbineFlag.ACC_MODULE,
-            majorVersion,
+            lowerOptions.languageVersion().majorVersion(),
+            /* minorVersion= */ 0,
             name,
             /* signature= */ null,
             /* superClass= */ null,
@@ -333,8 +290,7 @@ public class Lower {
         provides.build());
   }
 
-  private byte[] lower(
-      SourceTypeBoundClass info, ClassSymbol sym, Set<ClassSymbol> symbols, int majorVersion) {
+  private byte[] lower(SourceTypeBoundClass info, ClassSymbol sym, Set<ClassSymbol> symbols) {
     int access = classAccess(info);
     String name = sig.descriptor(sym);
     String signature = sig.classSignature(info, env);
@@ -374,18 +330,26 @@ public class Lower {
 
     String nestHost = null;
     ImmutableList<String> nestMembers = ImmutableList.of();
-    // nests were added in Java 11, i.e. major version 55
-    if (majorVersion >= 55) {
+    if (lowerOptions.languageVersion().emitNests()) {
       nestHost = collectNestHost(info.source(), info.owner());
       nestMembers = nestHost == null ? collectNestMembers(info.source(), info) : ImmutableList.of();
     }
 
     ImmutableList<ClassFile.InnerClass> inners = collectInnerClasses(info.source(), sym, info);
 
+    boolean isValueClass =
+        info.kind().equals(TurbineTyKind.CLASS)
+            && ((info.access() & TurbineFlag.ACC_IDENTITY) == 0);
+    int minorVersion =
+        (lowerOptions.languageVersion().preview() && isValueClass)
+            ? ClassFile.PREVIEW_MINOR_VERSION
+            : 0;
+
     ClassFile classfile =
         new ClassFile(
             access,
-            majorVersion,
+            lowerOptions.languageVersion().majorVersion(),
+            minorVersion,
             name,
             signature,
             superName,
@@ -421,6 +385,10 @@ public class Lower {
 
   private ClassFile.MethodInfo lowerMethod(final MethodInfo m, final ClassSymbol sym) {
     int access = m.access();
+    if (!lowerOptions.languageVersion().emitStrictfp()) {
+      // For Java ≥ 17, FP is always strict, and the ACC_STRICT flag is never emitted
+      access &= ~TurbineFlag.ACC_STRICT;
+    }
     Function<TyVarSymbol, TyVarInfo> tenv = new TyVarEnv(m.tyParams());
     String name = m.name();
     String desc = methodDescriptor(m, tenv);
@@ -579,7 +547,7 @@ public class Lower {
   private ImmutableList<String> collectNestMembers(SourceFile source, SourceTypeBoundClass info) {
     Set<ClassSymbol> nestMembers = new LinkedHashSet<>();
     for (ClassSymbol child : info.children().values()) {
-      addNestMembers(source, env, nestMembers, child);
+      addNestMembers(source, nestMembers, child);
     }
     ImmutableList.Builder<String> result = ImmutableList.builder();
     for (ClassSymbol nestMember : nestMembers) {
@@ -588,11 +556,10 @@ public class Lower {
     return result.build();
   }
 
-  private static void addNestMembers(
-      SourceFile source,
-      Env<ClassSymbol, TypeBoundClass> env,
-      Set<ClassSymbol> nestMembers,
-      ClassSymbol sym) {
+  private void addNestMembers(SourceFile source, Set<ClassSymbol> nestMembers, ClassSymbol sym) {
+    if (emitted != null && !emitted.contains(sym)) {
+      return;
+    }
     if (!nestMembers.add(sym)) {
       return;
     }
@@ -601,7 +568,7 @@ public class Lower {
       throw TurbineError.format(source, ErrorKind.CLASS_FILE_NOT_FOUND, sym);
     }
     for (ClassSymbol child : info.children().values()) {
-      addNestMembers(source, env, nestMembers, child);
+      addNestMembers(source, nestMembers, child);
     }
   }
 

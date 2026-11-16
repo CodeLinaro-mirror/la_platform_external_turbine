@@ -18,7 +18,6 @@ package com.google.turbine.deps;
 
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
@@ -31,6 +30,8 @@ import com.google.turbine.diag.SourceFile;
 import com.google.turbine.lower.IntegrationTestSupport;
 import com.google.turbine.lower.Lower;
 import com.google.turbine.lower.Lower.Lowered;
+import com.google.turbine.options.LowerOptions;
+import com.google.turbine.parallel.TurbineExecutor;
 import com.google.turbine.parse.Parser;
 import com.google.turbine.proto.DepsProto;
 import com.google.turbine.testing.TestClassPaths;
@@ -101,7 +102,7 @@ public class DependenciesTest {
     DepsProto.Dependencies run() throws IOException {
       BindingResult bound =
           Binder.bind(
-              newDirectExecutorService(),
+              TurbineExecutor.direct(),
               units.build(),
               ClassPathBinder.bindClasspath(classpath),
               TestClassPaths.TURBINE_BOOTCLASSPATH,
@@ -109,8 +110,8 @@ public class DependenciesTest {
 
       Lowered lowered =
           Lower.lowerAll(
-              newDirectExecutorService(),
-              Lower.LowerOptions.createDefault(),
+              TurbineExecutor.direct(),
+              LowerOptions.createDefault(),
               bound.units(),
               bound.modules(),
               bound.classPathEnv());

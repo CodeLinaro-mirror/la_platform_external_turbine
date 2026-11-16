@@ -17,18 +17,13 @@
 package com.google.turbine.main;
 
 import static com.google.common.base.StandardSystemProperty.JAVA_SPECIFICATION_VERSION;
-import static com.google.common.util.concurrent.MoreExecutors.listeningDecorator;
-import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
-import static java.util.concurrent.Executors.newFixedThreadPool;
 
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.hash.Hashing;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.turbine.binder.Binder;
 import com.google.turbine.binder.Binder.BindingResult;
@@ -42,6 +37,7 @@ import com.google.turbine.binder.bound.SourceTypeBoundClass;
 import com.google.turbine.binder.sym.ClassSymbol;
 import com.google.turbine.deps.Dependencies;
 import com.google.turbine.deps.Transitive;
+import com.google.turbine.diag.AnnotationProcessingError;
 import com.google.turbine.diag.SourceFile;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.lower.Lower;
@@ -49,7 +45,7 @@ import com.google.turbine.lower.Lower.Lowered;
 import com.google.turbine.options.TurbineOptions;
 import com.google.turbine.options.TurbineOptions.ReducedClasspathMode;
 import com.google.turbine.options.TurbineOptionsParser;
-import com.google.turbine.parallel.Parallel;
+import com.google.turbine.parallel.TurbineExecutor;
 import com.google.turbine.parse.Parser;
 import com.google.turbine.proto.DepsProto;
 import com.google.turbine.proto.ManifestProto;
@@ -98,6 +94,13 @@ public final class Main {
     } catch (TurbineError | UsageException e) {
       System.err.println(e.getMessage());
       ok = false;
+    } catch (AnnotationProcessingError e) {
+      System.err.println(e.getMessage());
+      var cause = e.getCause();
+      if (cause != null) {
+        cause.printStackTrace(System.err);
+      }
+      ok = false;
     } catch (Throwable turbineCrash) {
       turbineCrash.printStackTrace();
       ok = false;
@@ -144,17 +147,13 @@ public final class Main {
   public static Result compile(TurbineOptions options) throws IOException {
     usage(options);
 
-    boolean parallel = options.parallel() && !options.javacOpts().contains("-XDnoParallel");
-    try (ListeningExecutorService executor =
-        listeningDecorator(
-            parallel
-                ? newFixedThreadPool(Runtime.getRuntime().availableProcessors())
-                : newDirectExecutorService())) {
+    try (TurbineExecutor executor =
+        TurbineExecutor.create(options.parallel(), options.javacOpts().parallelMinThreshold())) {
       return compile(options, executor);
     }
   }
 
-  private static Result compile(TurbineOptions options, ListeningExecutorService executor)
+  private static Result compile(TurbineOptions options, TurbineExecutor executor)
       throws IOException {
     ImmutableList<CompUnit> units = parseAll(executor, options);
 
@@ -185,7 +184,7 @@ public final class Main {
         reducedClasspathLength = reducedClasspath.size();
         try {
           bound = bind(executor, options, units, bootclasspath, reducedClasspath);
-        } catch (TurbineError e) {
+        } catch (TurbineError | AnnotationProcessingError e) {
           bound = fallback(executor, options, units, bootclasspath, classPath);
           transitiveClasspathFallback = true;
         }
@@ -194,7 +193,7 @@ public final class Main {
         transitiveClasspathLength = options.fullClasspathLength();
         try {
           bound = bind(executor, options, units, bootclasspath, classPath);
-        } catch (TurbineError e) {
+        } catch (TurbineError | AnnotationProcessingError e) {
           writeJdepsForFallback(options);
           return Result.create(
               /* transitiveClasspathFallback= */ true,
@@ -213,10 +212,7 @@ public final class Main {
       Lowered lowered =
           Lower.lowerAll(
               executor,
-              Lower.LowerOptions.builder()
-                  .languageVersion(options.languageVersion())
-                  .javacOpts(options.javacOpts())
-                  .build(),
+              options.javacOpts().lowerOptions(),
               bound.units(),
               bound.modules(),
               bound.classPathEnv());
@@ -262,7 +258,7 @@ public final class Main {
 
   // don't inline this; we want it to show up in profiles
   private static BindingResult fallback(
-      ListeningExecutorService executor,
+      TurbineExecutor executor,
       TurbineOptions options,
       ImmutableList<CompUnit> units,
       ClassPath bootclasspath,
@@ -288,7 +284,7 @@ public final class Main {
   }
 
   private static BindingResult bind(
-      ListeningExecutorService executor,
+      TurbineExecutor executor,
       TurbineOptions options,
       ImmutableList<CompUnit> units,
       ClassPath bootclasspath,
@@ -355,13 +351,13 @@ public final class Main {
   }
 
   /** Parse all source files and source jars. */
-  private static ImmutableList<CompUnit> parseAll(
-      ListeningExecutorService executor, TurbineOptions options) throws IOException {
+  private static ImmutableList<CompUnit> parseAll(TurbineExecutor executor, TurbineOptions options)
+      throws IOException {
     return parseAll(executor, options.sources(), options.sourceJars());
   }
 
   static ImmutableList<CompUnit> parseAll(
-      ListeningExecutorService executor, Iterable<String> sources, Iterable<String> sourceJars)
+      TurbineExecutor executor, Iterable<String> sources, Iterable<String> sourceJars)
       throws IOException {
     List<SourceFile> sourceFiles = new ArrayList<>();
     for (String source : sources) {
@@ -379,11 +375,7 @@ public final class Main {
         }
       }
     }
-    List<ListenableFuture<CompUnit>> futures = new ArrayList<>();
-    for (SourceFile sourceFile : sourceFiles) {
-      futures.add(executor.submit(() -> Parser.parse(sourceFile)));
-    }
-    return Parallel.allAsList(futures);
+    return executor.map(ImmutableList.copyOf(sourceFiles), Parser::parse);
   }
 
   /** Writes source files generated by annotation processors. */
