@@ -63,14 +63,15 @@ java_defaults {
 }
 
 // Core turbine library for tools (such as Metalava) that embed Turbine's parser,
-// binder, and type model as a library without the CLI entry point (main) or
-// protobuf dependency reducer (deps).
+// binder, and type model as a library without the CLI entry point (main),
+// bytecode lowering (lower), or protobuf dependency reducer (deps).
 java_library_host {
     name: "turbine-core",
     defaults: ["turbine-defaults"],
 
     exclude_srcs: [
         "java/com/google/turbine/deps/**/*.java",
+        "java/com/google/turbine/lower/**/*.java",
         "java/com/google/turbine/main/**/*.java",
     ],
 
