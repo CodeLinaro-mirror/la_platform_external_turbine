@@ -15,6 +15,6 @@ third_party {
   identifier {
     type: "Git"
     value: "https://github.com/google/turbine"
-    version: "11035bfddb2d3e9e52adc148ef6aac14704eb59a"
+    version: "f1b761d374bfb63a57d0004559fdf37dc6e145e9"
   }
 }
