@@ -26,6 +26,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSetMultimap;
 import com.google.common.collect.Sets;
+import com.google.turbine.binder.Binder.BindingRequest;
 import com.google.turbine.binder.Binder.BindingResult;
 import com.google.turbine.binder.Binder.Statistics;
 import com.google.turbine.binder.bound.SourceTypeBoundClass;
@@ -53,10 +54,6 @@ import com.google.turbine.processing.TurbineRoundEnvironment;
 import com.google.turbine.processing.TurbineTypes;
 import com.google.turbine.tree.Tree.CompUnit;
 import com.google.turbine.type.AnnoInfo;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.net.URLClassLoader;
-import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -66,7 +63,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 import javax.annotation.processing.Processor;
@@ -77,18 +73,13 @@ import org.jspecify.annotations.Nullable;
 /** Top level annotation processing logic, see also {@link Binder}. */
 public class Processing {
 
-  static @Nullable BindingResult process(
-      TurbineExecutor executor,
-      TurbineLog log,
-      final ImmutableList<CompUnit> initialSources,
-      final ClassPath classpath,
-      ProcessorInfo processorInfo,
-      ClassPath bootclasspath,
-      BindingResult result,
-      Optional<String> moduleVersion) {
+  static BindingResult process(
+      TurbineExecutor executor, TurbineLog log, BindingRequest request, BindingResult result) {
+    ClassPath classpath = request.classpath();
+    ProcessorInfo processorInfo = request.processorInfo();
 
     Set<String> seen = new HashSet<>();
-    for (CompUnit u : initialSources) {
+    for (CompUnit u : request.units()) {
       if (u.source() != null) {
         seen.add(u.source().path());
       }
@@ -150,7 +141,7 @@ public class Processing {
         initializeSupportedAnnotationTypes(processorInfo);
 
     ImmutableList.Builder<CompUnit> units =
-        ImmutableList.<CompUnit>builder().addAll(initialSources);
+        ImmutableList.<CompUnit>builder().addAll(request.units());
 
     // Share one cache across all generated sources, since identifiers repeat across files.
     StringCache stringCache = new StringCache();
@@ -206,12 +197,9 @@ public class Processing {
           Binder.bind(
               executor,
               log,
-              units.build(),
+              request.toBuilder().units(units.build()).build(),
               filer.generatedSources(),
-              filer.generatedClasses(),
-              classpath,
-              bootclasspath,
-              moduleVersion);
+              filer.generatedClasses());
       tenv = new SimpleEnv<>(result.units());
       env = CompoundEnv.<ClassSymbol, TypeBoundClass>of(result.classPathEnv()).append(tenv);
       syms = Sets.difference(result.units().keySet(), allSymbols).immutableCopy();
@@ -250,15 +238,9 @@ public class Processing {
           Binder.bind(
               executor,
               log,
-              units.build(),
+              request.toBuilder().units(units.build()).build(),
               filer.generatedSources(),
-              filer.generatedClasses(),
-              classpath,
-              bootclasspath,
-              moduleVersion);
-      if (log.anyErrors()) {
-        return null;
-      }
+              filer.generatedClasses());
     }
     if (!filer.generatedClasses().isEmpty()) {
       // add any generated class files to the output
@@ -410,47 +392,6 @@ public class Processing {
       }
     }
     return processors.build();
-  }
-
-  public static ClassLoader processorLoader(
-      ImmutableList<String> processorPath, ImmutableSet<String> builtinProcessors)
-      throws MalformedURLException {
-    if (processorPath.isEmpty()) {
-      return Processing.class.getClassLoader();
-    }
-    return new URLClassLoader(
-        toUrls(processorPath),
-        new ClassLoader(ClassLoader.getPlatformClassLoader()) {
-          @Override
-          protected Class<?> findClass(String name) throws ClassNotFoundException {
-            if (name.equals("com.google.turbine.processing.TurbineProcessingEnvironment")) {
-              return Class.forName(name);
-            }
-            if (!builtinProcessors.isEmpty()) {
-              if (name.startsWith("com.sun.source.")
-                  || name.startsWith("com.sun.tools.")
-                  || name.startsWith("com.google.common.collect.")
-                  || name.startsWith("com.google.common.base.")
-                  || name.startsWith("com.google.common.graph.")
-                  || name.startsWith("com.google.devtools.build.buildjar.javac.statistics.")
-                  || name.startsWith("dagger.model.")
-                  || name.startsWith("dagger.spi.")
-                  || builtinProcessors.contains(name)) {
-                return Class.forName(name);
-              }
-            }
-            throw new ClassNotFoundException(name);
-          }
-        });
-  }
-
-  private static URL[] toUrls(ImmutableList<String> processorPath) throws MalformedURLException {
-    URL[] urls = new URL[processorPath.size()];
-    int i = 0;
-    for (String path : processorPath) {
-      urls[i++] = Paths.get(path).toUri().toURL();
-    }
-    return urls;
   }
 
   /** Information about any annotation processing performed by this compilation. */

@@ -16,7 +16,6 @@
 
 package com.google.turbine.deps;
 
-
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.turbine.binder.Binder.BindingResult;
@@ -30,12 +29,10 @@ import com.google.turbine.binder.sym.ClassSymbol;
 import com.google.turbine.bytecode.ClassFile;
 import com.google.turbine.bytecode.ClassFile.FieldInfo;
 import com.google.turbine.bytecode.ClassFile.InnerClass;
-import com.google.turbine.bytecode.ClassReader;
 import com.google.turbine.bytecode.ClassWriter;
 import com.google.turbine.model.TurbineFlag;
 import com.google.turbine.parallel.TurbineExecutor;
 import java.util.LinkedHashSet;
-import java.util.Map;
 import java.util.Set;
 import org.jspecify.annotations.Nullable;
 
@@ -46,9 +43,21 @@ import org.jspecify.annotations.Nullable;
  */
 public final class Transitive {
 
+  /**
+   * Returns trimmed copies of the classpath classes in the supertype closure of {@code classes},
+   * keyed by binary name.
+   *
+   * @param classes the classes in the compilation that are written to the output, see {@link
+   *     com.google.turbine.lower.Lower.Lowered#classes}. Private member classes that are omitted
+   *     from the output can't be referenced by downstream compilations, so their supertypes don't
+   *     need to be repackaged.
+   */
   public static ImmutableMap<String, byte[]> collectDeps(
-      TurbineExecutor executor, ClassPath bootClassPath, BindingResult bound) {
-    Set<ClassSymbol> closure = superClosure(bound);
+      TurbineExecutor executor,
+      ClassPath bootClassPath,
+      BindingResult bound,
+      Set<ClassSymbol> classes) {
+    Set<ClassSymbol> closure = superClosure(bound, classes);
     Dependencies.addPackageInfos(closure, bound);
     ImmutableList.Builder<BytecodeBoundClass> toTrim = ImmutableList.builder();
     for (ClassSymbol sym : closure) {
@@ -78,21 +87,6 @@ public final class Transitive {
     return new TrimmedClass(
         info.sym().binaryName(),
         ClassWriter.writeClass(trimClass(info.classFile(), info.jarFile())));
-  }
-
-  public static ImmutableMap<String, byte[]> trimOutput(ImmutableMap<String, byte[]> lowered) {
-    ImmutableMap.Builder<String, byte[]> trimmed = ImmutableMap.builder();
-    for (Map.Entry<String, byte[]> sym : lowered.entrySet()) {
-      if (sym.getKey().equals("module-info")) {
-        // Module attributes get trimmed which make module-infos invalid, and turbine doesn't need
-        // modules anyways, so just drop them for now.
-        continue;
-      }
-      trimmed.put(
-          sym.getKey(),
-          ClassWriter.writeClass(trimClass(ClassReader.read(sym::getKey, sym.getValue()), null)));
-    }
-    return trimmed.buildOrThrow();
   }
 
   /**
@@ -136,8 +130,8 @@ public final class Transitive {
             ? cf.methods()
             : ImmutableList.of(),
         fields.build(),
-        // unnecessary annotations are dropped during class reading, the only remaining ones are
-        // well-known @interface meta-annotations (e.g. @Retention, etc.)
+        // class annotations are kept as-is, e.g. downstream compilations need @interface
+        // meta-annotations like @Retention and @Target
         cf.annotations(),
         innerClasses.build(),
         cf.typeAnnotations(),
@@ -160,12 +154,12 @@ public final class Transitive {
     return false;
   }
 
-  private static Set<ClassSymbol> superClosure(BindingResult bound) {
+  private static Set<ClassSymbol> superClosure(BindingResult bound, Set<ClassSymbol> classes) {
     Env<ClassSymbol, TypeBoundClass> env =
         CompoundEnv.<ClassSymbol, TypeBoundClass>of(new SimpleEnv<>(bound.units()))
             .append(bound.classPathEnv());
     Set<ClassSymbol> closure = new LinkedHashSet<>();
-    for (ClassSymbol sym : bound.units().keySet()) {
+    for (ClassSymbol sym : classes) {
       addSuperTypes(closure, env, sym);
     }
     Set<ClassSymbol> directChildren = new LinkedHashSet<>();
