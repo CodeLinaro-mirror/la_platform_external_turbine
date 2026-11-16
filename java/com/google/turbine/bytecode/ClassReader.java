@@ -185,8 +185,8 @@ public class ClassReader {
   /**
    * Processes a JVMS 4.7.16 RuntimeVisibleAnnotations attribute.
    *
-   * <p>The only annotations that affect header compilation are {@link @Retention} and
-   * {@link @Target} on annotation declarations.
+   * <p>The only annotations that affect header compilation are {@code @Retention} and
+   * {@code @Target} on annotation declarations.
    */
   private void readAnnotations(
       ImmutableList.Builder<ClassFile.AnnotationInfo> annotations,
@@ -592,6 +592,10 @@ public class ClassReader {
           case "Signature" -> signature = readSignature(constantPool);
           default -> reader.skip(reader.u4());
         }
+      }
+      if ((accessFlags & TurbineFlag.ACC_SYNTHETIC) != 0) {
+        // e.g. this$0 and $VALUES; javac doesn't enter synthetic fields either
+        continue;
       }
       fields.add(
           new ClassFile.FieldInfo(
