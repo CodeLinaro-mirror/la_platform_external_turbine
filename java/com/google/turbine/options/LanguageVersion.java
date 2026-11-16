@@ -64,7 +64,7 @@ public record LanguageVersion(int source, int target, OptionalInt release, boole
   public SourceVersion sourceVersion() {
     try {
       return SourceVersion.valueOf("RELEASE_" + source());
-    } catch (IllegalArgumentException _) {
+    } catch (IllegalArgumentException unused) {
       return SourceVersion.latestSupported();
     }
   }

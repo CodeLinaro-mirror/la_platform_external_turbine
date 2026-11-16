@@ -212,23 +212,23 @@ public final class ClassPathBinder {
             new ClassSymbol(
                 name.substring(
                     TRANSITIVE_PREFIX.length(), name.length() - TRANSITIVE_SUFFIX.length()));
-        var _ = sym.hashCode();
+        var unused = sym.hashCode();
         result.transitive.add(new BytecodeBoundClass(sym, ze, benv, jarPath));
         continue;
       }
       if (!name.endsWith(".class")) {
-        var _ = name.hashCode();
+        var unused = name.hashCode();
         result.resources.add(ze);
         continue;
       }
       if (name.substring(name.lastIndexOf('/') + 1).equals("module-info.class")) {
         ModuleInfo moduleInfo = BytecodeBinder.bindModuleInfo(jarPath, ze);
-        var _ = moduleInfo.name().hashCode();
+        var unused = moduleInfo.name().hashCode();
         result.modules.add(moduleInfo);
         continue;
       }
       ClassSymbol sym = new ClassSymbol(name.substring(0, name.length() - ".class".length()));
-      var _ = sym.hashCode();
+      var unused = sym.hashCode();
       result.classes.add(new BytecodeBoundClass(sym, ze, benv, jarPath));
     }
   }
