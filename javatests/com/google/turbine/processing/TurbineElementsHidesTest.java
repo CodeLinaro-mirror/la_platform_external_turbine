@@ -227,7 +227,7 @@ public class TurbineElementsHidesTest {
   /** Compiles the test input with turbine. */
   private HidesTester runTurbine() throws IOException {
     ImmutableList<CompUnit> units =
-        input.sources.entrySet().stream()
+        input.sources().entrySet().stream()
             .map(e -> new SourceFile(e.getKey(), e.getValue()))
             .map(Parser::parse)
             .collect(toImmutableList());
@@ -235,7 +235,7 @@ public class TurbineElementsHidesTest {
         Binder.bind(
             TurbineExecutor.direct(),
             units,
-            ClassPathBinder.bindClasspath(ImmutableList.of()),
+            ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of()),
             TestClassPaths.TURBINE_BOOTCLASSPATH,
             Optional.empty());
     Env<ClassSymbol, TypeBoundClass> env =
@@ -254,7 +254,7 @@ public class TurbineElementsHidesTest {
     DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
     JavacTask javacTask =
         IntegrationTestSupport.runJavacAnalysis(
-            input.sources, ImmutableList.of(), ImmutableList.of(), diagnostics);
+            input.sources(), ImmutableList.of(), ImmutableList.of(), diagnostics);
     List<TypeElement> typeElements = new ArrayList<>();
     javacTask.addTaskListener(
         new TaskListener() {

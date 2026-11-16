@@ -178,7 +178,7 @@ public class ErrorTypeTest {
     DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
     JavacTask task =
         IntegrationTestSupport.runJavacAnalysis(
-            input.sources,
+            input.sources(),
             ImmutableList.of(),
             /* options= */ ImmutableList.of(),
             diagnostics,
@@ -198,7 +198,7 @@ public class ErrorTypeTest {
   private ImmutableList<String> runTurbine(
       IntegrationTestSupport.TestInput input, Processor... processors) {
     ImmutableList<Tree.CompUnit> units =
-        input.sources.entrySet().stream()
+        input.sources().entrySet().stream()
             .map(e -> new SourceFile(e.getKey(), e.getValue()))
             .map(Parser::parse)
             .collect(toImmutableList());
@@ -209,7 +209,7 @@ public class ErrorTypeTest {
                 Binder.bind(
                     TurbineExecutor.direct(),
                     units,
-                    ClassPathBinder.bindClasspath(ImmutableList.of()),
+                    ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of()),
                     Processing.ProcessorInfo.create(
                         ImmutableList.copyOf(processors),
                         getClass().getClassLoader(),

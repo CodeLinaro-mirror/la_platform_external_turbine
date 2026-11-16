@@ -44,10 +44,11 @@ import com.google.turbine.binder.sym.ClassSymbol;
 import com.google.turbine.binder.sym.FieldSymbol;
 import com.google.turbine.model.TurbineFlag;
 import com.google.turbine.model.TurbineTyKind;
+import com.google.turbine.parallel.TurbineExecutor;
 import com.google.turbine.tree.Tree.Ident;
 import com.google.turbine.type.AnnoInfo;
 import com.google.turbine.type.Type.ClassTy;
-import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.jar.Attributes;
@@ -204,8 +205,8 @@ public class ClassPathBinderTest {
             new ClassSymbol("java/util/List"),
             () -> getResourceBytes(getClass(), "/java/util/ArrayList.class"),
             env,
-            null);
-    VerifyException e = assertThrows(VerifyException.class, () -> c.owner());
+            () -> "test.jar");
+    VerifyException e = assertThrows(VerifyException.class, () -> c.superclass());
     assertThat(e)
         .hasMessageThat()
         .contains("expected class data for java/util/List, saw java/util/ArrayList instead");
@@ -216,8 +217,10 @@ public class ClassPathBinderTest {
     Path lib = temporaryFolder.newFile("NOT_A_JAR").toPath();
     MoreFiles.asCharSink(lib, UTF_8).write("hello");
 
-    IOException e =
-        assertThrows(IOException.class, () -> ClassPathBinder.bindClasspath(ImmutableList.of(lib)));
+    UncheckedIOException e =
+        assertThrows(
+            UncheckedIOException.class,
+            () -> ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of(lib)));
     assertThat(e).hasMessageThat().contains("NOT_A_JAR");
   }
 
@@ -230,7 +233,8 @@ public class ClassPathBinderTest {
       jos.putNextEntry(new JarEntry("foo/bar/Baz.class"));
       jos.write("goodbye".getBytes(UTF_8));
     }
-    ClassPath classPath = ClassPathBinder.bindClasspath(ImmutableList.of(path));
+    ClassPath classPath =
+        ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of(path));
     assertThat(new String(classPath.resource("foo/bar/hello.txt").get(), UTF_8)).isEqualTo("hello");
     assertThat(classPath.resource("foo/bar/Baz.class")).isNull();
   }
@@ -269,9 +273,54 @@ public class ClassPathBinderTest {
       byte[] bytes = cw.toByteArray();
       jos.write(bytes);
     }
-    ClassPath classPath = ClassPathBinder.bindClasspath(ImmutableList.of(path));
+    ClassPath classPath =
+        ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of(path));
     BytecodeBoundClass baz = classPath.env().get(new ClassSymbol("foo/bar/Baz"));
     assertThat(baz).isNotNull();
     assertThat(baz.jarFile()).isEqualTo("original.jar");
+    assertThat(baz.jarFile()).isSameInstanceAs(baz.jarFile());
+  }
+
+  @Test
+  public void originalJarFile_manifestAfterClass() throws Exception {
+    Path path = temporaryFolder.newFile("tmp2.jar").toPath();
+    try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(path))) {
+      jos.putNextEntry(new JarEntry("foo/bar/Baz.class"));
+      ClassWriter cw = new ClassWriter(0);
+      cw.visit(52, Opcodes.ACC_PUBLIC, "foo/bar/Baz", null, "java/lang/Object", new String[] {});
+      jos.write(cw.toByteArray());
+
+      jos.putNextEntry(new JarEntry("META-INF/MANIFEST.MF"));
+      Manifest manifest = new Manifest();
+      Attributes attributes = manifest.getMainAttributes();
+      attributes.put(Attributes.Name.MANIFEST_VERSION, "1.0");
+      attributes.put(new Attributes.Name("Original-Jar-Path"), "original2.jar");
+      manifest.write(jos);
+    }
+    ClassPath classPath =
+        ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of(path));
+    BytecodeBoundClass baz = classPath.env().get(new ClassSymbol("foo/bar/Baz"));
+    assertThat(baz).isNotNull();
+    assertThat(baz.jarFile()).isEqualTo("original2.jar");
+  }
+
+  @Test
+  public void originalJarFile_malformedManifestThrows() throws Exception {
+    Path path = temporaryFolder.newFile("malformed.jar").toPath();
+    try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(path))) {
+      jos.putNextEntry(new JarEntry("META-INF/MANIFEST.MF"));
+      jos.write(" leading space without header\n".getBytes(UTF_8));
+
+      jos.putNextEntry(new JarEntry("foo/bar/Baz.class"));
+      ClassWriter cw = new ClassWriter(0);
+      cw.visit(52, Opcodes.ACC_PUBLIC, "foo/bar/Baz", null, "java/lang/Object", new String[] {});
+      jos.write(cw.toByteArray());
+    }
+    ClassPath classPath =
+        ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of(path));
+    BytecodeBoundClass baz = classPath.env().get(new ClassSymbol("foo/bar/Baz"));
+    assertThat(baz).isNotNull();
+    assertThat(baz.superclass()).isEqualTo(new ClassSymbol("java/lang/Object"));
+    assertThrows(UncheckedIOException.class, baz::jarFile);
   }
 }

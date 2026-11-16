@@ -16,28 +16,29 @@
 
 package com.google.turbine.lower;
 
+import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.io.MoreFiles.getFileExtension;
 import static com.google.turbine.testing.TestClassPaths.TURBINE_BOOTCLASSPATH;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
-import static java.util.stream.Collectors.toCollection;
-import static java.util.stream.Collectors.toList;
-import static java.util.stream.Collectors.toSet;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeTrue;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.MultimapBuilder;
-import com.google.common.collect.Multimaps;
 import com.google.common.collect.SetMultimap;
 import com.google.common.io.MoreFiles;
 import com.google.common.jimfs.Configuration;
 import com.google.common.jimfs.Jimfs;
-import org.objectweb.asm.Opcodes;
 import com.google.turbine.binder.Binder;
 import com.google.turbine.binder.Binder.BindingResult;
 import com.google.turbine.binder.ClassPath;
@@ -56,18 +57,66 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.io.UncheckedIOException;
+import java.lang.classfile.AccessFlags;
+import java.lang.classfile.Annotation;
+import java.lang.classfile.AnnotationElement;
+import java.lang.classfile.AnnotationValue;
+import java.lang.classfile.Attribute;
+import java.lang.classfile.AttributedElement;
+import java.lang.classfile.Attributes;
+import java.lang.classfile.ClassBuilder;
+import java.lang.classfile.ClassElement;
+import java.lang.classfile.ClassFile;
+import java.lang.classfile.ClassModel;
+import java.lang.classfile.ClassSignature;
+import java.lang.classfile.ClassTransform;
+import java.lang.classfile.FieldElement;
+import java.lang.classfile.FieldModel;
+import java.lang.classfile.FieldTransform;
+import java.lang.classfile.MethodElement;
+import java.lang.classfile.MethodModel;
+import java.lang.classfile.MethodSignature;
+import java.lang.classfile.MethodTransform;
+import java.lang.classfile.Signature;
+import java.lang.classfile.Signature.ArrayTypeSig;
+import java.lang.classfile.Signature.BaseTypeSig;
+import java.lang.classfile.Signature.ClassTypeSig;
+import java.lang.classfile.Signature.RefTypeSig;
+import java.lang.classfile.Signature.ThrowableSig;
+import java.lang.classfile.Signature.TypeArg;
+import java.lang.classfile.Signature.TypeParam;
+import java.lang.classfile.Signature.TypeVarSig;
+import java.lang.classfile.TypeAnnotation;
+import java.lang.classfile.attribute.DeprecatedAttribute;
+import java.lang.classfile.attribute.InnerClassInfo;
+import java.lang.classfile.attribute.InnerClassesAttribute;
+import java.lang.classfile.attribute.NestHostAttribute;
+import java.lang.classfile.attribute.NestMembersAttribute;
+import java.lang.classfile.attribute.PermittedSubclassesAttribute;
+import java.lang.classfile.attribute.RecordAttribute;
+import java.lang.classfile.attribute.RecordComponentInfo;
+import java.lang.classfile.attribute.RuntimeInvisibleAnnotationsAttribute;
+import java.lang.classfile.attribute.RuntimeInvisibleParameterAnnotationsAttribute;
+import java.lang.classfile.attribute.RuntimeInvisibleTypeAnnotationsAttribute;
+import java.lang.classfile.attribute.RuntimeVisibleAnnotationsAttribute;
+import java.lang.classfile.attribute.RuntimeVisibleParameterAnnotationsAttribute;
+import java.lang.classfile.attribute.RuntimeVisibleTypeAnnotationsAttribute;
+import java.lang.classfile.constantpool.ClassEntry;
+import java.lang.classfile.constantpool.Utf8Entry;
+import java.lang.constant.ClassDesc;
+import java.lang.constant.MethodTypeDesc;
+import java.lang.reflect.AccessFlag;
 import java.nio.file.FileSystem;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -75,36 +124,167 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.annotation.processing.Processor;
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaFileObject;
 import javax.tools.StandardLocation;
-import org.objectweb.asm.ClassReader;
-import org.objectweb.asm.ClassWriter;
-import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.Type;
-import org.objectweb.asm.signature.SignatureReader;
-import org.objectweb.asm.signature.SignatureVisitor;
-import org.objectweb.asm.tree.AnnotationNode;
-import org.objectweb.asm.tree.ClassNode;
-import org.objectweb.asm.tree.FieldNode;
-import org.objectweb.asm.tree.InnerClassNode;
-import org.objectweb.asm.tree.MethodNode;
-import org.objectweb.asm.tree.RecordComponentNode;
-import org.objectweb.asm.tree.TypeAnnotationNode;
 
 /** Support for bytecode diffing-integration tests. */
 public final class IntegrationTestSupport {
 
+  public static final ImmutableList<TestInput> TEST_CASES = discoverTestCases();
+
+  public static final int DEFAULT_SOURCE_VERSION = 25;
+
+  private static ImmutableList<TestInput> discoverTestCases() {
+    try {
+      ImmutableList<TestInput> result =
+          com.google.common.reflect.ClassPath.from(IntegrationTestSupport.class.getClassLoader())
+              .getResources()
+              .stream()
+              .filter(
+                  r ->
+                      r.getResourceName().startsWith("com/google/turbine/lower/testdata/")
+                          && r.getResourceName().endsWith(".test")
+                          // TODO(cushon): crashes ASM, see:
+                          // https://gitlab.ow2.org/asm/asm/issues/317776
+                          && !r.getResourceName().endsWith("/canon_array.test")
+                          // contains broken imports intended to test turbine's lazy error handling
+                          && !r.getResourceName().endsWith("/importlazy.test"))
+              .map(
+                  r -> {
+                    try {
+                      String name =
+                          r.getResourceName()
+                              .substring("com/google/turbine/lower/testdata/".length());
+                      return TestInput.parse(name, r.asCharSource(UTF_8).read());
+                    } catch (IOException e) {
+                      throw new UncheckedIOException(e);
+                    }
+                  })
+              .sorted(comparing(TestInput::name))
+              .collect(toImmutableList());
+      verify(result.size() >= 300, "expected at least 300 test cases, got %s", result.size());
+      return result;
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+  }
+
+  private static final ClassFile CLASS_FILE = ClassFile.of();
+
+  private static final Comparator<InnerClassInfo> INNER_CLASS_INFO_COMPARATOR =
+      Comparator.comparing((InnerClassInfo x) -> x.innerClass().asInternalName())
+          .thenComparing(x -> x.outerClass().map(ClassEntry::asInternalName).orElse(""))
+          .thenComparing(x -> x.innerName().map(Utf8Entry::stringValue).orElse(""))
+          .thenComparingInt(InnerClassInfo::flagsMask);
+
+  private static final Comparator<Annotation> ANNOTATION_COMPARATOR =
+      Comparator.comparing((Annotation a) -> a.className().stringValue())
+          .thenComparing(a -> String.valueOf(a.elements()));
+
+  private static final Comparator<TypeAnnotation> TYPE_ANNOTATION_COMPARATOR =
+      Comparator.comparing((TypeAnnotation a) -> a.annotation().className().stringValue())
+          .thenComparing(a -> String.valueOf(a.targetInfo().targetType()))
+          .thenComparing(a -> String.valueOf(a.targetInfo()))
+          .thenComparing(a -> String.valueOf(a.targetPath()))
+          .thenComparing(a -> String.valueOf(a.annotation().elements()));
+
+  private static Attribute<?> sortAttribute(Attribute<?> attr) {
+    return switch (attr) {
+      case RuntimeVisibleAnnotationsAttribute a ->
+          RuntimeVisibleAnnotationsAttribute.of(sortAnnotations(a.annotations()));
+      case RuntimeInvisibleAnnotationsAttribute a ->
+          RuntimeInvisibleAnnotationsAttribute.of(sortAnnotations(a.annotations()));
+      case RuntimeVisibleTypeAnnotationsAttribute a ->
+          RuntimeVisibleTypeAnnotationsAttribute.of(sortTypeAnnotations(a.annotations()));
+      case RuntimeInvisibleTypeAnnotationsAttribute a ->
+          RuntimeInvisibleTypeAnnotationsAttribute.of(sortTypeAnnotations(a.annotations()));
+      case RuntimeVisibleParameterAnnotationsAttribute a ->
+          RuntimeVisibleParameterAnnotationsAttribute.of(
+              sortParameterAnnotations(a.parameterAnnotations()));
+      case RuntimeInvisibleParameterAnnotationsAttribute a ->
+          RuntimeInvisibleParameterAnnotationsAttribute.of(
+              sortParameterAnnotations(a.parameterAnnotations()));
+      case InnerClassesAttribute a -> InnerClassesAttribute.of(sortInnerClasses(a.classes()));
+      case NestMembersAttribute a ->
+          NestMembersAttribute.of(
+              ImmutableList.sortedCopyOf(
+                  Comparator.comparing(ClassEntry::asInternalName), a.nestMembers()));
+      case RecordAttribute a ->
+          RecordAttribute.of(
+              a.components().stream()
+                  .map(IntegrationTestSupport::sortRecordComponentInfo)
+                  .toList());
+      default -> attr;
+    };
+  }
+
+  private static RecordComponentInfo sortRecordComponentInfo(RecordComponentInfo r) {
+    return RecordComponentInfo.of(
+        r.name(),
+        r.descriptor(),
+        r.attributes().stream().<Attribute<?>>map(IntegrationTestSupport::sortAttribute).toList());
+  }
+
+  private static ImmutableList<Annotation> sortAnnotations(List<Annotation> annotations) {
+    return ImmutableList.sortedCopyOf(ANNOTATION_COMPARATOR, annotations);
+  }
+
+  private static ImmutableList<TypeAnnotation> sortTypeAnnotations(
+      List<TypeAnnotation> annotations) {
+    return ImmutableList.sortedCopyOf(TYPE_ANNOTATION_COMPARATOR, annotations);
+  }
+
+  private static ImmutableList<List<Annotation>> sortParameterAnnotations(
+      List<List<Annotation>> parameterAnnotations) {
+    return parameterAnnotations.stream()
+        .map(IntegrationTestSupport::sortAnnotations)
+        .collect(toImmutableList());
+  }
+
+  private static ImmutableList<InnerClassInfo> sortInnerClasses(List<InnerClassInfo> classes) {
+    return ImmutableList.sortedCopyOf(INNER_CLASS_INFO_COMPARATOR, classes);
+  }
+
   /**
    * Normalizes order of members, attributes, and constant pool entries, to allow diffing bytecode.
    */
-  public static Map<String, byte[]> sortMembers(Map<String, byte[]> in) {
-    List<ClassNode> classes = toClassNodes(in);
-    for (ClassNode n : classes) {
-      sortAttributes(n);
+  public static ImmutableMap<String, byte[]> sortMembers(Map<String, byte[]> in) {
+    ImmutableMap.Builder<String, byte[]> result = ImmutableMap.builder();
+    for (byte[] entryValue : in.values()) {
+      ClassModel cm = CLASS_FILE.parse(entryValue);
+      byte[] bytes = CLASS_FILE.transformClass(cm, IntegrationTestSupport::sortMembers);
+      result.put(cm.thisClass().asInternalName() + ".class", bytes);
     }
-    return toByteCode(classes);
+    return result.buildOrThrow();
+  }
+
+  private static void sortMembers(ClassBuilder builder, ClassElement element) {
+    switch (element) {
+      case Attribute<?> attr -> builder.with((ClassElement) sortAttribute(attr));
+      case MethodModel mm ->
+          builder.transformMethod(
+              mm,
+              (mb, me) -> {
+                switch (me) {
+                  case Attribute<?> attr -> mb.with((MethodElement) sortAttribute(attr));
+                  default -> mb.with(me);
+                }
+              });
+      case FieldModel fm ->
+          builder.transformField(
+              fm,
+              (fb, fe) -> {
+                switch (fe) {
+                  case Attribute<?> attr -> fb.with((FieldElement) sortAttribute(attr));
+                  default -> fb.with(fe);
+                }
+              });
+      default -> builder.with(element);
+    }
   }
 
   /**
@@ -113,68 +293,212 @@ public final class IntegrationTestSupport {
    * header compiler (code, debug info, etc.)
    */
   public static Map<String, byte[]> canonicalize(Map<String, byte[]> in) {
-    List<ClassNode> classes = toClassNodes(in);
+    List<ClassModel> classes = new ArrayList<>();
+    for (byte[] bytes : in.values()) {
+      classes.add(CLASS_FILE.parse(bytes));
+    }
 
     // drop local and anonymous classes
-    classes =
-        classes.stream()
-            .filter(n -> !isAnonymous(n) && !isLocal(n))
-            .collect(toCollection(ArrayList::new));
+    classes.removeIf(n -> isAnonymous(n) || isLocal(n));
 
     // collect all inner classes attributes
-    Map<String, InnerClassNode> infos = new HashMap<>();
-    for (ClassNode n : classes) {
-      for (InnerClassNode innerClassNode : n.innerClasses) {
-        infos.put(innerClassNode.name, innerClassNode);
-      }
+    Map<String, InnerClassInfo> infos = new HashMap<>();
+    for (ClassModel n : classes) {
+      n.findAttribute(Attributes.innerClasses())
+          .ifPresent(
+              attr -> {
+                for (InnerClassInfo innerClassInfo : attr.classes()) {
+                  infos.put(innerClassInfo.innerClass().asInternalName(), innerClassInfo);
+                }
+              });
     }
 
-    for (ClassNode n : classes) {
-      removeImplementation(n);
-    }
-
-    SetMultimap<String, ClassNode> byOutermostClass =
+    SetMultimap<String, ClassModel> byOutermostClass =
         MultimapBuilder.hashKeys().hashSetValues().build();
-    for (ClassNode n : classes) {
-      byOutermostClass.put(outermostClass(n.name, infos), n);
+    for (ClassModel n : classes) {
+      byOutermostClass.put(outermostClass(n.thisClass().asInternalName(), infos), n);
     }
 
-    List<ClassNode> result = new ArrayList<>();
-    for (Set<ClassNode> unit : Multimaps.asMap(byOutermostClass).values()) {
-      Map<String, ClassNode> remaining = pruneUnusedPrivateClasses(unit, infos);
-      Set<String> removed = new HashSet<>();
-      for (ClassNode n : unit) {
-        if (!remaining.containsKey(n.name)) {
-          removed.add(n.name);
+    Map<String, ClassModel> allRemaining = new HashMap<>();
+    Map<String, Set<String>> removedByUnit = new HashMap<>();
+    for (var entry : byOutermostClass.asMap().entrySet()) {
+      Map<String, ClassModel> remaining =
+          pruneUnusedPrivateClasses(new HashSet<>(entry.getValue()), infos);
+      allRemaining.putAll(remaining);
+      ImmutableSet<String> removed =
+          entry.getValue().stream()
+              .map(n -> n.thisClass().asInternalName())
+              .filter(n -> !remaining.containsKey(n))
+              .collect(toImmutableSet());
+      removedByUnit.put(entry.getKey(), removed);
+    }
+
+    Map<String, byte[]> result = new LinkedHashMap<>();
+    for (var entry : byOutermostClass.asMap().entrySet()) {
+      Set<String> removed = removedByUnit.get(entry.getKey());
+      for (ClassModel n : entry.getValue()) {
+        if (allRemaining.containsKey(n.thisClass().asInternalName())) {
+          result.put(
+              n.thisClass().asInternalName() + ".class",
+              canonicalizeClass(n, infos, allRemaining.keySet(), removed));
         }
       }
-      for (ClassNode n : remaining.values()) {
-        removeUnusedInnerClassAttributes(infos, n, removed);
-        makeEnumsNonAbstract(remaining.keySet(), n);
-        removePermittedSubclassesFromEnums(n);
-        sortAttributes(n);
-        undeprecate(n);
-      }
-      result.addAll(remaining.values());
     }
-    return toByteCode(result);
+    return result;
   }
 
-  private static Map<String, ClassNode> pruneUnusedPrivateClasses(
-      Set<ClassNode> classes, Map<String, InnerClassNode> infos) {
+  private static byte[] canonicalizeClass(
+      ClassModel cm,
+      Map<String, InnerClassInfo> infos,
+      Set<String> remainingClassNames,
+      Set<String> removed) {
+    boolean isEnum = cm.flags().has(AccessFlag.ENUM);
+    boolean hasDeprecatedAnno = hasDeprecatedAnnotation(cm);
+    ImmutableList<InnerClassInfo> innerClasses =
+        canonicalizeInnerClasses(cm, infos, remainingClassNames, removed);
+    ImmutableList<ClassEntry> nestMembers = canonicalizeNestMembers(cm, innerClasses);
+
+    return CLASS_FILE.transformClass(
+        cm,
+        (builder, element) -> {
+          switch (element) {
+            case AccessFlags flags when isEnum ->
+                // Javac may add ACC_ABSTRACT to enums; turbine normalizes enums to omit
+                // ACC_ABSTRACT.
+                builder.withFlags(flags.flagsMask() & ~ClassFile.ACC_ABSTRACT);
+            case InnerClassesAttribute _ -> {
+              // Replace with canonicalized inner classes.
+              if (!innerClasses.isEmpty()) {
+                builder.with(InnerClassesAttribute.of(innerClasses));
+              }
+            }
+            case NestMembersAttribute _ -> {
+              // Replace with canonicalized nest members.
+              if (!nestMembers.isEmpty()) {
+                builder.with(NestMembersAttribute.of(nestMembers));
+              }
+            }
+            // Drop PermittedSubclasses for enums (javac adds them for enums with constant class
+            // bodies).
+            case PermittedSubclassesAttribute _ when isEnum -> {}
+            // Turbine only emits Deprecated attributes when @Deprecated annotation is present.
+            case DeprecatedAttribute _ when !hasDeprecatedAnno -> {}
+            case MethodModel mm when isSkippedMethod(mm) -> {}
+            case MethodModel mm -> builder.transformMethod(mm, canonicalizeMethod(mm));
+            case FieldModel fm when isSkippedField(fm) -> {}
+            case FieldModel fm -> builder.transformField(fm, canonicalizeField(fm));
+            case Attribute<?> attr -> builder.with((ClassElement) sortAttribute(attr));
+            default -> builder.with(element);
+          }
+        });
+  }
+
+  private static boolean isSkippedMethod(MethodModel mm) {
+    return mm.flags().has(AccessFlag.SYNTHETIC)
+        || mm.flags().has(AccessFlag.PRIVATE)
+        // Turbine does not emit class initializers in header jars.
+        || mm.methodName().equalsString("<clinit>");
+  }
+
+  private static boolean isSkippedField(FieldModel fm) {
+    return fm.flags().has(AccessFlag.SYNTHETIC) || fm.flags().has(AccessFlag.PRIVATE);
+  }
+
+  private static MethodTransform canonicalizeMethod(MethodModel mm) {
+    return (mb, me) -> {
+      switch (me) {
+        case DeprecatedAttribute _ when !hasDeprecatedAnnotation(mm) -> {}
+        case Attribute<?> attr -> mb.with((MethodElement) sortAttribute(attr));
+        default -> mb.with(me);
+      }
+    };
+  }
+
+  private static FieldTransform canonicalizeField(FieldModel fm) {
+    return (fb, fe) -> {
+      switch (fe) {
+        case DeprecatedAttribute _ when !hasDeprecatedAnnotation(fm) -> {}
+        case Attribute<?> attr -> fb.with((FieldElement) sortAttribute(attr));
+        default -> fb.with(fe);
+      }
+    };
+  }
+
+  private static ImmutableList<InnerClassInfo> canonicalizeInnerClasses(
+      ClassModel cm,
+      Map<String, InnerClassInfo> infos,
+      Set<String> remainingClassNames,
+      Set<String> removed) {
+    String thisClassName = cm.thisClass().asInternalName();
+    List<InnerClassInfo> innerClasses =
+        cm.findAttribute(Attributes.innerClasses())
+            .map(InnerClassesAttribute::classes)
+            .orElse(ImmutableList.of());
+    Set<String> types = getReferencedTypes(cm, infos, /* includeNestMembers= */ true);
+    Map<String, InnerClassInfo> used = new LinkedHashMap<>();
+    for (InnerClassInfo i : innerClasses) {
+      if (i.has(AccessFlag.SYNTHETIC) || i.innerName().isEmpty()) {
+        continue;
+      }
+      String name = i.innerClass().asInternalName();
+      if (removed.contains(name)) {
+        continue;
+      }
+      if (i.outerClass().isPresent()
+          && i.outerClass().get().asInternalName().equals(thisClassName)) {
+        used.put(name, i);
+      } else if (types.contains(name)) {
+        for (InnerClassInfo enclosing : enclosingInnerClassNodes(name, infos)) {
+          used.put(enclosing.innerClass().asInternalName(), enclosing);
+        }
+      }
+    }
+    List<InnerClassInfo> processed = new ArrayList<>();
+    for (InnerClassInfo x : used.values()) {
+      if (x.has(AccessFlag.ENUM) && remainingClassNames.contains(x.innerClass().asInternalName())) {
+        processed.add(
+            InnerClassInfo.of(
+                x.innerClass(),
+                x.outerClass(),
+                x.innerName(),
+                x.flagsMask() & ~ClassFile.ACC_ABSTRACT));
+      } else {
+        processed.add(x);
+      }
+    }
+    return sortInnerClasses(processed);
+  }
+
+  private static ImmutableList<ClassEntry> canonicalizeNestMembers(
+      ClassModel cm, List<InnerClassInfo> innerClasses) {
+    ImmutableSet<String> memberNames =
+        innerClasses.stream().map(i -> i.innerClass().asInternalName()).collect(toImmutableSet());
+    return cm.findAttribute(Attributes.nestMembers())
+        .map(
+            nm ->
+                nm.nestMembers().stream()
+                    .filter(m -> memberNames.contains(m.asInternalName()))
+                    .sorted(Comparator.comparing(ClassEntry::asInternalName))
+                    .collect(toImmutableList()))
+        .orElse(ImmutableList.of());
+  }
+
+  private static Map<String, ClassModel> pruneUnusedPrivateClasses(
+      Set<ClassModel> classes, Map<String, InnerClassInfo> infos) {
     Set<String> declared = new HashSet<>();
-    for (ClassNode n : classes) {
-      declared.add(n.name);
+    for (ClassModel n : classes) {
+      declared.add(n.thisClass().asInternalName());
     }
     SetMultimap<String, String> usages = MultimapBuilder.hashKeys().hashSetValues().build();
     List<String> roots = new ArrayList<>();
-    for (ClassNode n : classes) {
+    for (ClassModel n : classes) {
+      String name = n.thisClass().asInternalName();
       if (!isPrivateMemberClass(n, infos)) {
-        roots.add(n.name);
+        roots.add(name);
       }
       for (String ref : getReferencedTypes(n, infos, /* includeNestMembers= */ false)) {
         if (declared.contains(ref)) {
-          usages.put(n.name, ref);
+          usages.put(name, ref);
         }
       }
     }
@@ -182,10 +506,10 @@ public final class IntegrationTestSupport {
     for (String root : roots) {
       closure(reachable, root, usages);
     }
-    Map<String, ClassNode> pruned = new HashMap<>();
-    for (ClassNode n : classes) {
-      if (reachable.contains(n.name)) {
-        pruned.put(n.name, n);
+    Map<String, ClassModel> pruned = new HashMap<>();
+    for (ClassModel n : classes) {
+      if (reachable.contains(n.thisClass().asInternalName())) {
+        pruned.put(n.thisClass().asInternalName(), n);
       }
     }
     return pruned;
@@ -200,374 +524,274 @@ public final class IntegrationTestSupport {
     }
   }
 
-  private static ImmutableList<InnerClassNode> enclosingInnerClassNodes(
-      String className, Map<String, InnerClassNode> infos) {
-    ImmutableList.Builder<InnerClassNode> builder = ImmutableList.builder();
+  private static ImmutableList<InnerClassInfo> enclosingInnerClassNodes(
+      String className, Map<String, InnerClassInfo> infos) {
+    ImmutableList.Builder<InnerClassInfo> builder = ImmutableList.builder();
     String curr = className;
-    while (infos.containsKey(curr)) {
-      InnerClassNode info = infos.get(curr);
+    while (curr != null && infos.containsKey(curr)) {
+      InnerClassInfo info = infos.get(curr);
       builder.add(info);
-      curr = info.outerName;
+      curr = info.outerClass().map(ClassEntry::asInternalName).orElse(null);
     }
     return builder.build().reverse();
   }
 
-  private static boolean isPrivateMemberClass(ClassNode n, Map<String, InnerClassNode> infos) {
-    return enclosingInnerClassNodes(n.name, infos).stream()
-        .anyMatch(info -> (info.access & Opcodes.ACC_PRIVATE) == Opcodes.ACC_PRIVATE);
+  private static boolean isPrivateMemberClass(ClassModel cm, Map<String, InnerClassInfo> infos) {
+    return enclosingInnerClassNodes(cm.thisClass().asInternalName(), infos).stream()
+        .anyMatch(info -> info.has(AccessFlag.PRIVATE));
   }
 
-  private static String outermostClass(String className, Map<String, InnerClassNode> infos) {
-    ImmutableList<InnerClassNode> enclosing = enclosingInnerClassNodes(className, infos);
-    return enclosing.isEmpty() ? className : enclosing.getFirst().outerName;
+  private static String outermostClass(String className, Map<String, InnerClassInfo> infos) {
+    ImmutableList<InnerClassInfo> enclosing = enclosingInnerClassNodes(className, infos);
+    return enclosing.isEmpty()
+        ? className
+        : enclosing.getFirst().outerClass().map(ClassEntry::asInternalName).orElse(className);
   }
 
-  public static Map<String, byte[]> removeUnsupportedAttributes(Map<String, byte[]> in) {
-    List<ClassNode> classes = toClassNodes(in);
-    for (ClassNode c : classes) {
-      c.nestMembers = null;
-      c.nestHostClass = null;
+  public static ImmutableMap<String, byte[]> removeUnsupportedAttributes(Map<String, byte[]> in) {
+    ClassTransform transform =
+        ClassTransform.dropping(
+            e ->
+                switch (e) {
+                  case NestMembersAttribute _, NestHostAttribute _ -> true;
+                  default -> false;
+                });
+    ImmutableMap.Builder<String, byte[]> result = ImmutableMap.builder();
+    for (byte[] bytes : in.values()) {
+      ClassModel cm = CLASS_FILE.parse(bytes);
+      result.put(
+          cm.thisClass().asInternalName() + ".class", CLASS_FILE.transformClass(cm, transform));
     }
-    return toByteCode(classes);
+    return result.buildOrThrow();
   }
 
-  private static boolean isLocal(ClassNode n) {
-    return n.outerMethod != null;
+  private static boolean isLocal(ClassModel cm) {
+    return cm.findAttribute(Attributes.enclosingMethod()).isPresent();
   }
 
-  private static boolean isAnonymous(ClassNode n) {
+  private static boolean isAnonymous(ClassModel cm) {
     // JVMS 4.7.6: if C is anonymous, the value of the inner_name_index item must be zero
-    return n.innerClasses.stream().anyMatch(i -> i.name.equals(n.name) && i.innerName == null);
+    String className = cm.thisClass().asInternalName();
+    return cm
+        .findAttribute(Attributes.innerClasses())
+        .map(InnerClassesAttribute::classes)
+        .orElse(ImmutableList.of())
+        .stream()
+        .anyMatch(
+            i -> i.innerClass().asInternalName().equals(className) && i.innerName().isEmpty());
   }
 
-  // ASM sets ACC_DEPRECATED for elements with the Deprecated attribute;
-  // unset it if the @Deprecated annotation is not also present.
-  // This can happen if the @deprecated javadoc tag was present but the
-  // annotation wasn't.
-  private static void undeprecate(ClassNode n) {
-    if (!isDeprecated(n.visibleAnnotations)) {
-      n.access &= ~Opcodes.ACC_DEPRECATED;
-    }
-    n.methods.stream()
-        .filter(m -> !isDeprecated(m.visibleAnnotations))
-        .forEach(m -> m.access &= ~Opcodes.ACC_DEPRECATED);
-    n.fields.stream()
-        .filter(f -> !isDeprecated(f.visibleAnnotations))
-        .forEach(f -> f.access &= ~Opcodes.ACC_DEPRECATED);
-  }
-
-  private static boolean isDeprecated(List<AnnotationNode> visibleAnnotations) {
-    return visibleAnnotations != null
-        && visibleAnnotations.stream().anyMatch(a -> a.desc.equals("Ljava/lang/Deprecated;"));
-  }
-
-  private static void makeEnumsNonAbstract(Set<String> all, ClassNode n) {
-    n.innerClasses.forEach(
-        x -> {
-          if (all.contains(x.name) && (x.access & Opcodes.ACC_ENUM) == Opcodes.ACC_ENUM) {
-            x.access &= ~Opcodes.ACC_ABSTRACT;
-          }
-        });
-    if ((n.access & Opcodes.ACC_ENUM) == Opcodes.ACC_ENUM) {
-      n.access &= ~Opcodes.ACC_ABSTRACT;
-    }
-  }
-
-  // anonymous enum subclasses classes aren't part of the ABI and are not emitted by turbine,
-  // so the permitted subclass attribute emitted by javac is removed
-  private static void removePermittedSubclassesFromEnums(ClassNode n) {
-    if ((n.access & Opcodes.ACC_ENUM) == Opcodes.ACC_ENUM) {
-      n.permittedSubclasses = null;
-    }
-  }
-
-  private static Map<String, byte[]> toByteCode(List<ClassNode> classes) {
-    Map<String, byte[]> out = new LinkedHashMap<>();
-    for (ClassNode n : classes) {
-      ClassWriter cw = new ClassWriter(0);
-      n.accept(cw);
-      out.put(n.name + ".class", cw.toByteArray());
-    }
-    return out;
-  }
-
-  private static List<ClassNode> toClassNodes(Map<String, byte[]> in) {
-    List<ClassNode> classes = new ArrayList<>();
-    for (byte[] f : in.values()) {
-      ClassNode n = new ClassNode();
-      new ClassReader(f).accept(n, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
-
-      classes.add(n);
-    }
-    return classes;
-  }
-
-  /** Remove elements that are omitted by turbine, e.g. private and synthetic members. */
-  private static void removeImplementation(ClassNode n) {
-    n.innerClasses =
-        n.innerClasses.stream()
-            .filter(x -> (x.access & Opcodes.ACC_SYNTHETIC) == 0 && x.innerName != null)
-            .collect(toList());
-
-    n.methods =
-        n.methods.stream()
-            .filter(x -> (x.access & (Opcodes.ACC_SYNTHETIC | Opcodes.ACC_PRIVATE)) == 0)
-            .filter(x -> !x.name.equals("<clinit>"))
-            .collect(toList());
-
-    n.fields =
-        n.fields.stream()
-            .filter(x -> (x.access & (Opcodes.ACC_SYNTHETIC | Opcodes.ACC_PRIVATE)) == 0)
-            .collect(toList());
-  }
-
-  /** Apply a standard sort order to attributes. */
-  private static void sortAttributes(ClassNode n) {
-
-    n.innerClasses.sort(
-        Comparator.comparing((InnerClassNode x) -> x.name)
-            .thenComparing(x -> x.outerName)
-            .thenComparing(x -> x.innerName)
-            .thenComparingInt(x -> x.access));
-
-    sortAnnotations(n.visibleAnnotations);
-    sortAnnotations(n.invisibleAnnotations);
-    sortTypeAnnotations(n.visibleTypeAnnotations);
-    sortTypeAnnotations(n.invisibleTypeAnnotations);
-
-    for (MethodNode m : n.methods) {
-      sortParameterAnnotations(m.visibleParameterAnnotations);
-      sortParameterAnnotations(m.invisibleParameterAnnotations);
-
-      sortAnnotations(m.visibleAnnotations);
-      sortAnnotations(m.invisibleAnnotations);
-      sortTypeAnnotations(m.visibleTypeAnnotations);
-      sortTypeAnnotations(m.invisibleTypeAnnotations);
-    }
-
-    for (FieldNode f : n.fields) {
-      sortAnnotations(f.visibleAnnotations);
-      sortAnnotations(f.invisibleAnnotations);
-      sortTypeAnnotations(f.visibleTypeAnnotations);
-      sortTypeAnnotations(f.invisibleTypeAnnotations);
-    }
-
-    if (n.recordComponents != null) {
-      for (RecordComponentNode r : n.recordComponents) {
-        sortAnnotations(r.visibleAnnotations);
-        sortAnnotations(r.invisibleAnnotations);
-        sortTypeAnnotations(r.visibleTypeAnnotations);
-        sortTypeAnnotations(r.invisibleTypeAnnotations);
-      }
-    }
-
-    if (n.nestMembers != null) {
-      Collections.sort(n.nestMembers);
-    }
-  }
-
-  private static void sortParameterAnnotations(List<AnnotationNode>[] parameters) {
-    if (parameters == null) {
-      return;
-    }
-    for (List<AnnotationNode> annos : parameters) {
-      sortAnnotations(annos);
-    }
-  }
-
-  private static void sortTypeAnnotations(List<TypeAnnotationNode> annos) {
-    if (annos == null) {
-      return;
-    }
-    annos.sort(
-        Comparator.comparing((TypeAnnotationNode a) -> a.desc)
-            .thenComparing(a -> String.valueOf(a.typeRef))
-            .thenComparing(a -> String.valueOf(a.typePath))
-            .thenComparing(a -> String.valueOf(a.values)));
-  }
-
-  private static void sortAnnotations(List<AnnotationNode> annos) {
-    if (annos == null) {
-      return;
-    }
-    annos.sort(
-        Comparator.comparing((AnnotationNode a) -> a.desc)
-            .thenComparing(a -> String.valueOf(a.values)));
+  private static boolean hasDeprecatedAnnotation(AttributedElement element) {
+    return element
+        .findAttribute(Attributes.runtimeVisibleAnnotations())
+        .map(RuntimeVisibleAnnotationsAttribute::annotations)
+        .orElse(ImmutableList.of())
+        .stream()
+        .anyMatch(a -> a.className().equalsString("Ljava/lang/Deprecated;"));
   }
 
   /** Visit all descriptors and signatures in the bytecode to find references to inner classes. */
   private static Set<String> getReferencedTypes(
-      ClassNode n, Map<String, InnerClassNode> infos, boolean includeNestMembers) {
+      ClassModel cm, Map<String, InnerClassInfo> infos, boolean includeNestMembers) {
     Set<String> types = new HashSet<>();
-    {
-      types.add(n.name);
-      collectTypesFromSignature(types, n.signature);
-      if (n.superName != null) {
-        types.add(n.superName);
+    types.add(cm.thisClass().asInternalName());
+    cm.findAttribute(Attributes.signature())
+        .ifPresent(s -> collectTypesFromClassSignature(types, s.asClassSignature()));
+    cm.superclass().ifPresent(s -> types.add(s.asInternalName()));
+    for (ClassEntry iface : cm.interfaces()) {
+      types.add(iface.asInternalName());
+    }
+    addAllTypesInAnnotations(types, cm);
+    for (MethodModel m : cm.methods()) {
+      if (isSkippedMethod(m)) {
+        continue;
       }
-      types.addAll(n.interfaces);
+      collectTypesFromMethodType(types, m.methodTypeSymbol());
+      m.findAttribute(Attributes.signature())
+          .ifPresent(s -> collectTypesFromMethodSignature(types, s.asMethodSignature()));
+      m.findAttribute(Attributes.exceptions())
+          .ifPresent(e -> e.exceptions().forEach(ex -> types.add(ex.asInternalName())));
 
-      addTypesInAnnotations(types, n.visibleAnnotations);
-      addTypesInAnnotations(types, n.invisibleAnnotations);
-      addTypesInTypeAnnotations(types, n.visibleTypeAnnotations);
-      addTypesInTypeAnnotations(types, n.invisibleTypeAnnotations);
+      addAllTypesInAnnotations(types, m);
+      addTypesFromParameterAnnotations(types, m);
+
+      m.findAttribute(Attributes.annotationDefault())
+          .ifPresent(a -> collectTypesFromAnnotationValue(types, a.defaultValue()));
     }
-    for (MethodNode m : n.methods) {
-      collectTypesFromSignature(types, m.desc);
-      collectTypesFromSignature(types, m.signature);
-      types.addAll(m.exceptions);
-
-      addTypesInAnnotations(types, m.visibleAnnotations);
-      addTypesInAnnotations(types, m.invisibleAnnotations);
-      addTypesInTypeAnnotations(types, m.visibleTypeAnnotations);
-      addTypesInTypeAnnotations(types, m.invisibleTypeAnnotations);
-
-      addTypesFromParameterAnnotations(types, m.visibleParameterAnnotations);
-      addTypesFromParameterAnnotations(types, m.invisibleParameterAnnotations);
-
-      collectTypesFromAnnotationValue(types, m.annotationDefault);
-    }
-    for (FieldNode f : n.fields) {
-      collectTypesFromSignature(types, f.desc);
-      collectTypesFromSignature(types, f.signature);
-
-      addTypesInAnnotations(types, f.visibleAnnotations);
-      addTypesInAnnotations(types, f.invisibleAnnotations);
-      addTypesInTypeAnnotations(types, f.visibleTypeAnnotations);
-      addTypesInTypeAnnotations(types, f.invisibleTypeAnnotations);
-    }
-    if (n.recordComponents != null) {
-      for (RecordComponentNode r : n.recordComponents) {
-        collectTypesFromSignature(types, r.descriptor);
-        collectTypesFromSignature(types, r.signature);
-
-        addTypesInAnnotations(types, r.visibleAnnotations);
-        addTypesInAnnotations(types, r.invisibleAnnotations);
-        addTypesInTypeAnnotations(types, r.visibleTypeAnnotations);
-        addTypesInTypeAnnotations(types, r.invisibleTypeAnnotations);
+    for (FieldModel f : cm.fields()) {
+      if (isSkippedField(f)) {
+        continue;
       }
-    }
+      collectTypesFromClassDesc(types, f.fieldTypeSymbol());
+      f.findAttribute(Attributes.signature())
+          .ifPresent(s -> collectTypesFromSignature(types, s.asTypeSignature()));
 
-    if (includeNestMembers && n.nestMembers != null) {
-      for (String member : n.nestMembers) {
-        InnerClassNode i = infos.get(member);
-        if (i.outerName != null) {
-          types.add(member);
-        }
-      }
+      addAllTypesInAnnotations(types, f);
     }
-    enclosingInnerClassNodes(n.name, infos).forEach(i -> types.add(i.name));
+    cm.findAttribute(Attributes.record())
+        .ifPresent(
+            record -> {
+              for (RecordComponentInfo r : record.components()) {
+                collectTypesFromClassDesc(types, r.descriptorSymbol());
+                r.findAttribute(Attributes.signature())
+                    .ifPresent(s -> collectTypesFromSignature(types, s.asTypeSignature()));
+
+                addAllTypesInAnnotations(types, r);
+              }
+            });
+
+    if (includeNestMembers) {
+      cm.findAttribute(Attributes.nestMembers())
+          .ifPresent(
+              nest -> {
+                for (ClassEntry member : nest.nestMembers()) {
+                  InnerClassInfo i = infos.get(member.asInternalName());
+                  if (i != null && i.outerClass().isPresent()) {
+                    types.add(member.asInternalName());
+                  }
+                }
+              });
+    }
+    enclosingInnerClassNodes(cm.thisClass().asInternalName(), infos)
+        .forEach(i -> types.add(i.innerClass().asInternalName()));
     return types;
   }
 
-  /** Remove InnerClass attributes that are no longer needed after member pruning. */
-  private static void removeUnusedInnerClassAttributes(
-      Map<String, InnerClassNode> infos, ClassNode n, Set<String> removed) {
+  private static void addAllTypesInAnnotations(Set<String> types, AttributedElement element) {
+    addTypesInAnnotations(types, element);
+    addTypesInTypeAnnotations(types, element);
+  }
 
-    Set<String> types = getReferencedTypes(n, infos, /* includeNestMembers= */ true);
+  private static void addTypesFromParameterAnnotations(Set<String> types, MethodModel m) {
+    m.findAttribute(Attributes.runtimeVisibleParameterAnnotations())
+        .ifPresent(pa -> collectTypesFromParameterAnnotations(types, pa.parameterAnnotations()));
+    m.findAttribute(Attributes.runtimeInvisibleParameterAnnotations())
+        .ifPresent(pa -> collectTypesFromParameterAnnotations(types, pa.parameterAnnotations()));
+  }
 
-    List<InnerClassNode> used = new ArrayList<>();
-    for (InnerClassNode i : n.innerClasses) {
-      if (removed.contains(i.name)) {
-        continue;
+  private static void collectTypesFromParameterAnnotations(
+      Set<String> types, List<List<Annotation>> parameterAnnotations) {
+    parameterAnnotations.stream()
+        .flatMap(Collection::stream)
+        .forEach(a -> collectTypesFromAnnotation(types, a));
+  }
+
+  private static void addTypesInAnnotations(Set<String> types, AttributedElement element) {
+    element
+        .findAttribute(Attributes.runtimeVisibleAnnotations())
+        .ifPresent(a -> a.annotations().forEach(anno -> collectTypesFromAnnotation(types, anno)));
+    element
+        .findAttribute(Attributes.runtimeInvisibleAnnotations())
+        .ifPresent(a -> a.annotations().forEach(anno -> collectTypesFromAnnotation(types, anno)));
+  }
+
+  private static void addTypesInTypeAnnotations(Set<String> types, AttributedElement element) {
+    element
+        .findAttribute(Attributes.runtimeVisibleTypeAnnotations())
+        .ifPresent(
+            a ->
+                a.annotations()
+                    .forEach(anno -> collectTypesFromAnnotation(types, anno.annotation())));
+    element
+        .findAttribute(Attributes.runtimeInvisibleTypeAnnotations())
+        .ifPresent(
+            a ->
+                a.annotations()
+                    .forEach(anno -> collectTypesFromAnnotation(types, anno.annotation())));
+  }
+
+  private static void collectTypesFromAnnotation(Set<String> types, Annotation a) {
+    collectTypesFromClassDesc(types, a.classSymbol());
+    for (AnnotationElement element : a.elements()) {
+      collectTypesFromAnnotationValue(types, element.value());
+    }
+  }
+
+  private static void collectTypesFromAnnotationValue(Set<String> types, AnnotationValue v) {
+    switch (v) {
+      case AnnotationValue.OfArray ofArray -> {
+        for (AnnotationValue elem : ofArray.values()) {
+          collectTypesFromAnnotationValue(types, elem);
+        }
       }
-      if (i.outerName != null && i.outerName.equals(n.name)) {
-        // keep InnerClass attributes for any member classes
-        used.add(i);
-      } else if (types.contains(i.name)) {
-        // otherwise, keep InnerClass attributes that were referenced in class or member signatures
-        used.addAll(enclosingInnerClassNodes(i.name, infos));
+      case AnnotationValue.OfClass ofClass ->
+          collectTypesFromClassDesc(types, ofClass.classSymbol());
+      case AnnotationValue.OfAnnotation ofAnno ->
+          collectTypesFromAnnotation(types, ofAnno.annotation());
+      case AnnotationValue.OfEnum ofEnum -> collectTypesFromClassDesc(types, ofEnum.classSymbol());
+      default -> {}
+    }
+  }
+
+  private static final Pattern CLASS_DESCRIPTOR_PATTERN = Pattern.compile("L(.*);");
+
+  private static void collectTypesFromClassDesc(Set<String> classes, ClassDesc desc) {
+    while (desc.isArray()) {
+      desc = desc.componentType();
+    }
+    if (!desc.isPrimitive()) {
+      String descriptor = desc.descriptorString();
+      Matcher matcher = CLASS_DESCRIPTOR_PATTERN.matcher(descriptor);
+      verify(matcher.matches());
+      classes.add(matcher.group(1));
+    }
+  }
+
+  private static void collectTypesFromMethodType(Set<String> classes, MethodTypeDesc methodType) {
+    collectTypesFromClassDesc(classes, methodType.returnType());
+    for (ClassDesc param : methodType.parameterList()) {
+      collectTypesFromClassDesc(classes, param);
+    }
+  }
+
+  private static void collectTypesFromClassSignature(Set<String> classes, ClassSignature sig) {
+    for (TypeParam param : sig.typeParameters()) {
+      collectTypesFromTypeParam(classes, param);
+    }
+    collectTypesFromSignature(classes, sig.superclassSignature());
+    for (ClassTypeSig iface : sig.superinterfaceSignatures()) {
+      collectTypesFromSignature(classes, iface);
+    }
+  }
+
+  private static void collectTypesFromMethodSignature(Set<String> classes, MethodSignature sig) {
+    for (TypeParam param : sig.typeParameters()) {
+      collectTypesFromTypeParam(classes, param);
+    }
+    for (Signature arg : sig.arguments()) {
+      collectTypesFromSignature(classes, arg);
+    }
+    collectTypesFromSignature(classes, sig.result());
+    for (ThrowableSig throwable : sig.throwableSignatures()) {
+      collectTypesFromSignature(classes, throwable);
+    }
+  }
+
+  private static void collectTypesFromTypeParam(Set<String> classes, TypeParam param) {
+    param.classBound().ifPresent(b -> collectTypesFromSignature(classes, b));
+    for (RefTypeSig bound : param.interfaceBounds()) {
+      collectTypesFromSignature(classes, bound);
+    }
+  }
+
+  private static void collectTypesFromSignature(Set<String> classes, Signature sig) {
+    switch (sig) {
+      case ClassTypeSig classTypeSig -> {
+        collectTypesFromClassDesc(classes, classTypeSig.classDesc());
+        for (ClassTypeSig curr = classTypeSig; curr != null; curr = curr.outerType().orElse(null)) {
+          for (TypeArg arg : curr.typeArgs()) {
+            switch (arg) {
+              case TypeArg.Bounded bounded ->
+                  collectTypesFromSignature(classes, bounded.boundType());
+              case TypeArg.Unbounded _ -> {}
+            }
+          }
+        }
       }
+      case ArrayTypeSig arrayTypeSig ->
+          collectTypesFromSignature(classes, arrayTypeSig.componentSignature());
+      case TypeVarSig _, BaseTypeSig _ -> {}
     }
-    n.innerClasses = used;
-
-    if (n.nestMembers != null) {
-      Set<String> members = used.stream().map(i -> i.name).collect(toSet());
-      n.nestMembers = n.nestMembers.stream().filter(members::contains).collect(toList());
-    }
-  }
-
-  private static void addTypesFromParameterAnnotations(
-      Set<String> types, List<AnnotationNode>[] parameterAnnotations) {
-    if (parameterAnnotations == null) {
-      return;
-    }
-    for (List<AnnotationNode> annos : parameterAnnotations) {
-      addTypesInAnnotations(types, annos);
-    }
-  }
-
-  private static void addTypesInTypeAnnotations(Set<String> types, List<TypeAnnotationNode> annos) {
-    if (annos == null) {
-      return;
-    }
-    annos.forEach(a -> collectTypesFromAnnotation(types, a));
-  }
-
-  private static void addTypesInAnnotations(Set<String> types, List<AnnotationNode> annos) {
-    if (annos == null) {
-      return;
-    }
-    annos.forEach(a -> collectTypesFromAnnotation(types, a));
-  }
-
-  private static void collectTypesFromAnnotation(Set<String> types, AnnotationNode a) {
-    collectTypesFromSignature(types, a.desc);
-    collectTypesFromAnnotationValues(types, a.values);
-  }
-
-  private static void collectTypesFromAnnotationValues(Set<String> types, List<?> values) {
-    if (values == null) {
-      return;
-    }
-    for (Object v : values) {
-      collectTypesFromAnnotationValue(types, v);
-    }
-  }
-
-  private static void collectTypesFromAnnotationValue(Set<String> types, Object v) {
-    if (v instanceof List) {
-      collectTypesFromAnnotationValues(types, (List<?>) v);
-    } else if (v instanceof Type type) {
-      collectTypesFromSignature(types, type.getDescriptor());
-    } else if (v instanceof AnnotationNode annotationNode) {
-      collectTypesFromAnnotation(types, annotationNode);
-    } else if (v instanceof String[] enumValue) {
-      collectTypesFromSignature(types, enumValue[0]);
-    }
-  }
-
-  /** Save all class types referenced in a signature. */
-  private static void collectTypesFromSignature(Set<String> classes, String signature) {
-    if (signature == null) {
-      return;
-    }
-    // signatures for qualified generic class types are visited as name and type argument pieces,
-    // so stitch them back together into a binary class name
-    new SignatureReader(signature)
-        .accept(
-            new SignatureVisitor(Opcodes.ASM9) {
-              // class signatures may contain type arguments that contain class signatures
-              final Deque<List<String>> pieces = new ArrayDeque<>();
-
-              @Override
-              public void visitInnerClassType(String name) {
-                pieces.getFirst().add(name);
-              }
-
-              @Override
-              public void visitClassType(String name) {
-                List<String> classType = new ArrayList<>();
-                classType.add(name);
-                pieces.push(classType);
-              }
-
-              @Override
-              public void visitEnd() {
-                classes.add(Joiner.on('$').join(pieces.pop()));
-                super.visitEnd();
-              }
-            });
   }
 
   public static Map<String, byte[]> runTurbine(
@@ -582,7 +806,7 @@ public final class IntegrationTestSupport {
         input, classpath, TURBINE_BOOTCLASSPATH, /* moduleVersion= */ Optional.empty(), javacopts);
   }
 
-  static Map<String, byte[]> runTurbine(
+  static ImmutableMap<String, byte[]> runTurbine(
       Map<String, String> input,
       ImmutableList<Path> classpath,
       ClassPath bootClassPath,
@@ -614,7 +838,7 @@ public final class IntegrationTestSupport {
     return Binder.bind(
         TurbineExecutor.direct(),
         units,
-        ClassPathBinder.bindClasspath(classpath),
+        ClassPathBinder.bindClasspath(TurbineExecutor.direct(), classpath),
         bootClassPath,
         moduleVersion);
   }
@@ -755,23 +979,94 @@ public final class IntegrationTestSupport {
     return sb.toString();
   }
 
-  public static class TestInput {
-
-    public final Map<String, String> sources;
-    public final Map<String, String> classes;
+  public record TestInput(
+      String name,
+      int sourceVersion,
+      boolean preview,
+      ImmutableList<String> extraJavacopts,
+      Map<String, String> sources,
+      Map<String, String> classes) {
 
     public TestInput(Map<String, String> sources, Map<String, String> classes) {
-      this.sources = sources;
-      this.classes = classes;
+      this("", DEFAULT_SOURCE_VERSION, false, ImmutableList.of(), sources, classes);
+    }
+
+    public ImmutableList<String> javacopts() {
+      int actualVersion = Runtime.version().feature();
+      int requiredVersion = sourceVersion();
+      assumeTrue(actualVersion >= requiredVersion);
+      ImmutableList.Builder<String> builder = ImmutableList.builder();
+      if (preview()) {
+        requiredVersion = actualVersion;
+        builder.add("--enable-preview");
+      }
+      return builder
+          .addAll(extraJavacopts())
+          .add(
+              "-source",
+              String.valueOf(requiredVersion),
+              "-target",
+              String.valueOf(requiredVersion))
+          .add("-Xpkginfo:always")
+          .build();
+    }
+
+    @Override
+    public String toString() {
+      return name;
     }
 
     public static TestInput parse(String text) {
+      return parse("", text);
+    }
+
+    public static TestInput parse(String name, String text) {
       Map<String, String> sources = new LinkedHashMap<>();
       Map<String, String> classes = new LinkedHashMap<>();
+      int sourceVersion = DEFAULT_SOURCE_VERSION;
+      boolean preview = false;
+      ImmutableList.Builder<String> javacopts = ImmutableList.builder();
+
+      List<String> allLines = Splitter.on('\n').splitToList(text);
+      int startLine = 0;
+      if (!allLines.isEmpty() && allLines.get(0).trim().equals("---")) {
+        int endIdx = -1;
+        for (int i = 1; i < allLines.size(); i++) {
+          if (allLines.get(i).trim().equals("---")) {
+            endIdx = i;
+            break;
+          }
+        }
+        if (endIdx != -1) {
+          for (int i = 1; i < endIdx; i++) {
+            String line = allLines.get(i).trim();
+            if (line.isEmpty() || line.startsWith("#")) {
+              continue;
+            }
+            List<String> parts = Splitter.on(':').limit(2).trimResults().splitToList(line);
+            if (parts.size() != 2) {
+              throw new IllegalArgumentException(
+                  String.format("Malformed header line in %s: %s", name, line));
+            }
+            switch (parts.get(0)) {
+              case "source_version" -> sourceVersion = Integer.parseInt(parts.get(1));
+              case "preview" -> preview = Boolean.parseBoolean(parts.get(1));
+              case "javacopts" ->
+                  javacopts.addAll(Splitter.on(' ').omitEmptyStrings().split(parts.get(1)));
+              default ->
+                  throw new IllegalArgumentException(
+                      String.format("Unknown header key in %s: %s", name, parts.get(0)));
+            }
+          }
+          startLine = endIdx + 1;
+        }
+      }
+
       String className = null;
       String sourceName = null;
       List<String> lines = new ArrayList<>();
-      for (String line : Splitter.on('\n').split(text)) {
+      for (int i = startLine; i < allLines.size(); i++) {
+        String line = allLines.get(i);
         if (line.startsWith("===")) {
           if (sourceName != null) {
             sources.put(sourceName, Joiner.on('\n').join(lines) + "\n");
@@ -803,7 +1098,7 @@ public final class IntegrationTestSupport {
         classes.put(className, Joiner.on('\n').join(lines) + "\n");
       }
       lines.clear();
-      return new TestInput(sources, classes);
+      return new TestInput(name, sourceVersion, preview, javacopts.build(), sources, classes);
     }
   }
 
