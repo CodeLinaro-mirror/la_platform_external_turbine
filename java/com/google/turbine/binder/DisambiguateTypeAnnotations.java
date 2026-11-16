@@ -111,6 +111,13 @@ public final class DisambiguateTypeAnnotations {
   }
 
   private MethodInfo bindMethod(MethodInfo base) {
+    ImmutableList<ParamInfo> parameters =
+        bindParameters(base.parameters(), TurbineElementType.PARAMETER);
+    ParamInfo receiver =
+        base.receiver() != null ? bindParam(base.receiver(), TurbineElementType.PARAMETER) : null;
+    if (base.annotations().isEmpty()) {
+      return base.withParametersAndReceiver(parameters, receiver);
+    }
     ImmutableList.Builder<AnnoInfo> declarationAnnotations = ImmutableList.builder();
     Type returnType =
         disambiguate(
@@ -124,25 +131,24 @@ public final class DisambiguateTypeAnnotations {
         base.sym(),
         base.tyParams(),
         returnType,
-        bindParameters(base.parameters(), TurbineElementType.PARAMETER),
+        parameters,
         base.exceptions(),
         base.access(),
         base.defaultValue(),
         base.decl(),
         declarationAnnotations.build(),
-        base.receiver() != null ? bindParam(base.receiver(), TurbineElementType.PARAMETER) : null);
+        receiver);
   }
 
   private ImmutableList<ParamInfo> bindParameters(
       ImmutableList<ParamInfo> params, TurbineElementType declarationTarget) {
-    ImmutableList.Builder<ParamInfo> result = ImmutableList.builder();
-    for (ParamInfo param : params) {
-      result.add(bindParam(param, declarationTarget));
-    }
-    return result.build();
+    return ImmutableListUtil.mapIfChanged(params, param -> bindParam(param, declarationTarget));
   }
 
   private ParamInfo bindParam(ParamInfo base, TurbineElementType declarationTarget) {
+    if (base.annotations().isEmpty()) {
+      return base;
+    }
     ImmutableList.Builder<AnnoInfo> declarationAnnotations = ImmutableList.builder();
     Type type =
         disambiguate(declarationTarget, base.type(), base.annotations(), declarationAnnotations);
@@ -177,6 +183,9 @@ public final class DisambiguateTypeAnnotations {
       Type type,
       ImmutableList<AnnoInfo> annotations,
       ImmutableList.Builder<AnnoInfo> declarationAnnotations) {
+    if (annotations.isEmpty()) {
+      return type;
+    }
     // desugar @Repeatable annotations before disambiguating: annotation containers may target
     // a subset of the types targeted by their element annotation
     annotations = groupRepeated(annotations);
@@ -218,6 +227,9 @@ public final class DisambiguateTypeAnnotations {
   }
 
   private FieldInfo bindField(FieldInfo base) {
+    if (base.annotations().isEmpty()) {
+      return base;
+    }
     ImmutableList.Builder<AnnoInfo> declarationAnnotations = ImmutableList.builder();
     Type type =
         disambiguate(
@@ -270,6 +282,12 @@ public final class DisambiguateTypeAnnotations {
 
   private static ImmutableList<AnnoInfo> appendAnnotations(
       ImmutableList<AnnoInfo> annos, ImmutableList<AnnoInfo> extra) {
+    if (extra.isEmpty()) {
+      return annos;
+    }
+    if (annos.isEmpty()) {
+      return extra;
+    }
     return ImmutableList.<AnnoInfo>builder().addAll(annos).addAll(extra).build();
   }
 
@@ -288,6 +306,9 @@ public final class DisambiguateTypeAnnotations {
   }
 
   private ImmutableList<AnnoInfo> groupRepeated(ImmutableList<AnnoInfo> annotations) {
+    if (annotations.size() <= 1) {
+      return annotations;
+    }
     Multimap<ClassSymbol, AnnoInfo> repeated =
         MultimapBuilder.linkedHashKeys().arrayListValues().build();
     ImmutableList.Builder<AnnoInfo> result = ImmutableList.builder();

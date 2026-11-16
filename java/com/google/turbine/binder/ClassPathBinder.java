@@ -93,28 +93,33 @@ public final class ClassPathBinder {
       totalClasses += r.classes.size() + r.transitive.size();
       totalResources += r.resources.size();
     }
-    Map<ClassSymbol, BytecodeBoundClass> map = Maps.newLinkedHashMapWithExpectedSize(totalClasses);
+    Map<ClassSymbol, BytecodeBoundClass> map = HashMap.newHashMap(totalClasses);
     env.map = map;
+    SimpleTopLevelIndex.Builder indexBuilder = SimpleTopLevelIndex.builder();
     Map<ModuleSymbol, ModuleInfo> modules = new HashMap<>();
     Map<String, Supplier<byte[]>> resources = Maps.newHashMapWithExpectedSize(totalResources);
     for (JarResult r : results) {
       for (BytecodeBoundClass c : r.classes) {
-        map.putIfAbsent(c.sym(), c);
+        if (map.putIfAbsent(c.sym(), c) == null) {
+          indexBuilder.insert(c.sym());
+        }
       }
       for (ModuleInfo m : r.modules) {
         modules.putIfAbsent(new ModuleSymbol(m.name()), m);
       }
-      for (Zip.Entry ze : r.resources) {
-        resources.put(ze.name(), ze);
+      for (Resource resource : r.resources) {
+        resources.put(resource.name(), resource.entry());
       }
     }
     for (JarResult r : results) {
       for (BytecodeBoundClass c : r.transitive) {
-        map.putIfAbsent(c.sym(), c);
+        if (map.putIfAbsent(c.sym(), c) == null) {
+          indexBuilder.insert(c.sym());
+        }
       }
     }
     SimpleEnv<ModuleSymbol, ModuleInfo> moduleEnv = new SimpleEnv<>(ImmutableMap.copyOf(modules));
-    TopLevelIndex index = SimpleTopLevelIndex.of(map.keySet());
+    TopLevelIndex index = indexBuilder.build();
     return new ClassPath() {
       @Override
       public Env<ClassSymbol, BytecodeBoundClass> env() {
@@ -138,11 +143,17 @@ public final class ClassPathBinder {
     };
   }
 
+  /**
+   * A non-class jar entry. The name is stored because {@link Zip.Entry#name()} decodes it on each
+   * call.
+   */
+  private record Resource(String name, Zip.Entry entry) {}
+
   private record JarResult(
       List<BytecodeBoundClass> classes,
       List<BytecodeBoundClass> transitive,
       List<ModuleInfo> modules,
-      List<Zip.Entry> resources) {
+      List<Resource> resources) {
     JarResult() {
       this(new ArrayList<>(), new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
     }
@@ -218,7 +229,7 @@ public final class ClassPathBinder {
       }
       if (!name.endsWith(".class")) {
         var unused = name.hashCode();
-        result.resources.add(ze);
+        result.resources.add(new Resource(name, ze));
         continue;
       }
       if (name.substring(name.lastIndexOf('/') + 1).equals("module-info.class")) {

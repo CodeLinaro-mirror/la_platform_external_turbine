@@ -21,6 +21,7 @@ import static com.google.common.collect.ImmutableSortedSet.toImmutableSortedSet;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.common.truth.TruthJUnit.assume;
 import static java.util.Comparator.comparing;
+import static java.util.Comparator.comparingInt;
 import static java.util.Comparator.naturalOrder;
 import static java.util.stream.Collectors.joining;
 
@@ -89,9 +90,6 @@ import org.junit.runner.RunWith;
 @RunWith(TestParameterInjector.class)
 public class JavacModelDiffTest {
 
-  /** Whether to compare the order of enclosed elements; see {@code Dumper#enclosedElements}. */
-  private static final boolean CHECK_MEMBER_ORDER = false;
-
   public static final class TestCaseProvider extends TestParameterValuesProvider {
     @Override
     public ImmutableList<TestInput> provideValues(Context context) {
@@ -104,93 +102,42 @@ public class JavacModelDiffTest {
    * the causes:
    *
    * <ul>
+   *   <li>anonymous-permits: Turbine doesn't model anonymous classes, so the anonymous permitted
+   *       subclasses of enums read from class files print as {@code Outer.1}.
    *   <li>dollar-in-name: a top-level class named {@code Test$0} prints as {@code Test.0}.
    *   <li>deprecated: {@code Elements.isDeprecated} ignores the javadoc {@code @deprecated} tag.
-   *   <li>enum-abstract-modifier: enums read from class files report {@code abstract}.
-   *   <li>enum-sealed, sealed: enums with constant bodies, and sealed types read from class files,
-   *       aren't {@code sealed}; anonymous permitted subclasses print as {@code Outer.1}.
-   *   <li>package-root-element: package elements from {@code package-info.java} aren't root
-   *       elements.
-   *   <li>private-interface-method: private interface methods are {@code abstract} or {@code
-   *       default}.
    *   <li>record-component-modifiers: record components have no modifiers; javac reports {@code
    *       public}.
-   *   <li>type-annotation-tostring: annotated nested types print as {@code Outer@A .Inner}, and
-   *       array dimension annotations print in reverse order.
    *   <li>type-parameter-annotations: annotations on type parameters differ (javac reports none).
    * </ul>
    */
   private static final ImmutableMap<String, String> KNOWN_FAILURES =
       ImmutableMap.<String, String>builder()
-          .put("fromClassPath/B74332665.test", "private-interface-method")
-          .put("fromClassPath/abstractenum.test", "enum-abstract-modifier, sealed")
-          .put("fromClassPath/c_array.test", "type-annotation-tostring")
+          .put("fromClassPath/abstractenum.test", "anonymous-permits")
           .put("fromClassPath/deprecated.test", "deprecated")
-          .put("fromClassPath/enum_abstract.test", "enum-abstract-modifier, enum-sealed, sealed")
-          .put("fromClassPath/enumimpl.test", "enum-abstract-modifier, sealed")
-          .put("fromClassPath/enumint2.test", "enum-abstract-modifier, sealed")
-          .put("fromClassPath/enumint_byte.test", "enum-abstract-modifier, sealed")
-          .put("fromClassPath/enumint_objectmethod2.test", "enum-abstract-modifier, sealed")
-          .put("fromClassPath/enuminthacks.test", "enum-abstract-modifier, sealed")
-          .put("fromClassPath/enumstat.test", "enum-abstract-modifier, sealed")
+          .put("fromClassPath/enum_abstract.test", "anonymous-permits")
+          .put("fromClassPath/enumimpl.test", "anonymous-permits")
+          .put("fromClassPath/enumint2.test", "anonymous-permits")
+          .put("fromClassPath/enumint_byte.test", "anonymous-permits")
+          .put("fromClassPath/enumint_objectmethod2.test", "anonymous-permits")
+          .put("fromClassPath/enuminthacks.test", "anonymous-permits")
+          .put("fromClassPath/enumstat.test", "anonymous-permits")
           .put("fromClassPath/javadoc_deprecated.test", "deprecated")
-          .put("fromClassPath/permits.test", "enum-sealed, sealed")
           .put("fromClassPath/record.test", "record-component-modifiers")
           .put("fromClassPath/record2.test", "record-component-modifiers")
-          .put(
-              "fromClassPath/record_ctor.test",
-              "record-component-modifiers, type-annotation-tostring")
+          .put("fromClassPath/record_ctor.test", "record-component-modifiers")
           .put("fromClassPath/record_fields.test", "record-component-modifiers")
           .put("fromClassPath/record_getter_override.test", "record-component-modifiers")
-          .put("fromClassPath/sealed.test", "enum-sealed, sealed")
-          .put("fromClassPath/sealed_nested.test", "enum-sealed, sealed")
-          .put("fromClassPath/strictfp.test", "enum-abstract-modifier, sealed")
-          .put("fromClassPath/type_anno_ambiguous.test", "type-annotation-tostring")
-          .put("fromClassPath/type_anno_array_dims.test", "type-annotation-tostring")
-          .put("fromClassPath/type_anno_c_array.test", "type-annotation-tostring")
-          .put("fromClassPath/type_anno_cstyle_array_dims.test", "type-annotation-tostring")
-          .put("fromClassPath/type_anno_hello.test", "type-annotation-tostring")
-          .put("fromClassPath/type_anno_nested.test", "type-annotation-tostring")
-          .put("fromClassPath/type_anno_nested_generic.test", "type-annotation-tostring")
-          .put("fromClassPath/type_anno_nested_raw.test", "type-annotation-tostring")
-          .put("fromClassPath/type_anno_qual.test", "type-annotation-tostring")
-          .put("fromClassPath/type_anno_raw.test", "type-annotation-tostring")
-          .put("fromClassPath/type_anno_receiver.test", "type-annotation-tostring")
-          .put("fromSource/B74332665.test", "private-interface-method")
-          .put("fromSource/abstractenum.test", "enum-sealed, sealed")
+          .put("fromClassPath/strictfp.test", "anonymous-permits")
           .put("fromSource/anno_repeated.test", "type-parameter-annotations")
-          .put("fromSource/c_array.test", "type-annotation-tostring")
           .put("fromSource/deprecated.test", "deprecated")
           .put("fromSource/dollar.test", "dollar-in-name")
-          .put("fromSource/empty_package_info.test", "package-root-element")
-          .put("fromSource/enum_abstract.test", "enum-sealed, sealed")
-          .put("fromSource/enumimpl.test", "enum-sealed, sealed")
-          .put("fromSource/enumint2.test", "enum-sealed, sealed")
-          .put("fromSource/enumint_byte.test", "enum-sealed, sealed")
-          .put("fromSource/enumint_objectmethod2.test", "enum-sealed, sealed")
-          .put("fromSource/enuminthacks.test", "enum-sealed, sealed")
-          .put("fromSource/enumstat.test", "enum-sealed, sealed")
           .put("fromSource/javadoc_deprecated.test", "deprecated")
-          .put("fromSource/package_info.test", "package-root-element")
-          .put("fromSource/packagedecl.test", "package-root-element")
           .put("fromSource/record.test", "deprecated, record-component-modifiers")
           .put("fromSource/record2.test", "record-component-modifiers")
-          .put(
-              "fromSource/record_ctor.test", "record-component-modifiers, type-annotation-tostring")
+          .put("fromSource/record_ctor.test", "record-component-modifiers")
           .put("fromSource/record_fields.test", "record-component-modifiers")
           .put("fromSource/record_getter_override.test", "record-component-modifiers")
-          .put("fromSource/strictfp.test", "enum-sealed, sealed")
-          .put("fromSource/type_anno_ambiguous.test", "type-annotation-tostring")
-          .put("fromSource/type_anno_array_dims.test", "type-annotation-tostring")
-          .put("fromSource/type_anno_c_array.test", "type-annotation-tostring")
-          .put("fromSource/type_anno_cstyle_array_dims.test", "type-annotation-tostring")
-          .put("fromSource/type_anno_hello.test", "type-annotation-tostring")
-          .put("fromSource/type_anno_nested.test", "type-annotation-tostring")
-          .put("fromSource/type_anno_nested_generic.test", "type-annotation-tostring")
-          .put("fromSource/type_anno_nested_raw.test", "type-annotation-tostring")
-          .put("fromSource/type_anno_qual.test", "type-annotation-tostring")
-          .put("fromSource/type_anno_raw.test", "type-annotation-tostring")
-          .put("fromSource/type_anno_receiver.test", "type-annotation-tostring")
           .buildOrThrow();
 
   @Rule public final TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -439,6 +386,10 @@ public class JavacModelDiffTest {
       if (elements.isDeprecated(e)) {
         line(d, "deprecated");
       }
+      Elements.Origin origin = elements.getOrigin(e);
+      if (origin != Elements.Origin.EXPLICIT) {
+        line(d, "origin: " + origin);
+      }
       switch (e) {
         case PackageElement p -> line(d, "qualified name: " + p.getQualifiedName());
         case TypeElement t -> typeElement(t, d);
@@ -458,28 +409,32 @@ public class JavacModelDiffTest {
     /**
      * Returns the enclosed elements to dump.
      *
-     * <p>Known difference: Turbine lists member types after fields and methods, and places implicit
-     * members (default constructors, enum {@code values}/{@code valueOf}) differently from javac,
-     * which lists member types first. Until that is fixed, elements are compared in a canonical
-     * order unless {@link #CHECK_MEMBER_ORDER} is set.
+     * <p>The order of enclosed elements is unspecified, and javac interleaves fields and methods in
+     * source order, which Turbine doesn't. Elements are grouped by kind (member types, record
+     * components, fields, then methods) with a stable sort, so the order within each group is still
+     * compared.
      *
      * <p>javac models {@code <clinit>} of class files as a {@code STATIC_INIT} element, which isn't
      * meaningful to processors, so initializers are skipped.
      */
     private static ImmutableList<Element> enclosedElements(Element e) {
-      ImmutableList<Element> enclosed =
-          e.getEnclosedElements().stream()
-              .filter(x -> x.getKind() != ElementKind.STATIC_INIT)
-              .filter(x -> x.getKind() != ElementKind.INSTANCE_INIT)
-              .collect(toImmutableList());
-      if (CHECK_MEMBER_ORDER) {
-        return enclosed;
+      return e.getEnclosedElements().stream()
+          .filter(x -> x.getKind() != ElementKind.STATIC_INIT)
+          .filter(x -> x.getKind() != ElementKind.INSTANCE_INIT)
+          .sorted(comparingInt(Dumper::memberGroup))
+          .collect(toImmutableList());
+    }
+
+    private static int memberGroup(Element e) {
+      ElementKind kind = e.getKind();
+      if (kind.isDeclaredType()) {
+        return 0;
       }
-      return ImmutableList.sortedCopyOf(
-          comparing((Element x) -> x.getKind().toString())
-              .thenComparing(x -> x.getSimpleName().toString())
-              .thenComparing(x -> x.asType().toString()),
-          enclosed);
+      return switch (kind) {
+        case RECORD_COMPONENT -> 1;
+        case ENUM_CONSTANT, FIELD -> 2;
+        default -> 3;
+      };
     }
 
     private void typeElement(TypeElement t, int d) {

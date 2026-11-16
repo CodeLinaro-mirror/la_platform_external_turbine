@@ -21,16 +21,28 @@ import static com.google.turbine.parse.UnicodeEscapePreprocessor.ASCII_SUB;
 import static java.lang.Math.min;
 
 import com.google.common.collect.ImmutableList;
+import com.google.turbine.cache.StringCache;
 import com.google.turbine.diag.SourceFile;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.diag.TurbineError.ErrorKind;
 import com.google.turbine.model.TurbineJavadoc;
+import java.util.Arrays;
 import org.jspecify.annotations.Nullable;
 
 /** A {@link Lexer} that streams input from a {@link UnicodeEscapePreprocessor}. */
 public class StreamLexer implements Lexer {
 
+  private static final int MAX_KEYWORD_LENGTH = 12;
+  private static final Token[][][] KEYWORDS = buildKeywords();
+
   private final UnicodeEscapePreprocessor reader;
+
+  /**
+   * A cache of strings read from the input, to avoid repeatedly allocating strings for identifiers
+   * that occur multiple times. It may be shared with other lexers, since identifiers are frequently
+   * repeated across files.
+   */
+  private final StringCache stringCache;
 
   /** The current input character. */
   private int ch;
@@ -41,14 +53,15 @@ public class StreamLexer implements Lexer {
   /** The start position of a numeric literal, identifier, or doc comment token. */
   private int readFrom;
 
-  /** The value of the current string or character literal token. */
+  /** The value of the current string literal, character literal, or identifier token. */
   private String value = null;
 
   /** A saved javadoc comment. */
   private TurbineJavadoc javadoc = null;
 
-  public StreamLexer(UnicodeEscapePreprocessor reader) {
+  public StreamLexer(UnicodeEscapePreprocessor reader, StringCache stringCache) {
     this.reader = reader;
+    this.stringCache = stringCache;
     eat();
   }
 
@@ -75,10 +88,15 @@ public class StreamLexer implements Lexer {
 
   @Override
   public String stringValue() {
-    if (value != null) {
-      return value;
+    if (value == null) {
+      value = internedString(readFrom, reader.position());
     }
-    return reader.readString(readFrom, reader.position());
+    return value;
+  }
+
+  /** Returns {@code reader.readString(from, to)}, reusing a previously read string if possible. */
+  private String internedString(int from, int to) {
+    return stringCache.getSubstring(reader.source().source(), from, to);
   }
 
   @Override
@@ -97,7 +115,7 @@ public class StreamLexer implements Lexer {
     while (true) {
       position = reader.position();
       switch (ch) {
-        case '\r', '\n', ' ', '\t', '\f' -> eat();
+        case '\r', '\n', ' ', '\t', '\f' -> ch = reader.skipWhitespace();
         case '/' -> {
           eat();
           switch (ch) {
@@ -642,7 +660,8 @@ public class StreamLexer implements Lexer {
 
   private String translateEscapes(String value) {
     StreamLexer lexer =
-        new StreamLexer(new UnicodeEscapePreprocessor(new SourceFile(null, value + ASCII_SUB)));
+        new StreamLexer(
+            new UnicodeEscapePreprocessor(new SourceFile(null, value + ASCII_SUB)), stringCache);
     try {
       return lexer.translateEscapes();
     } catch (TurbineError e) {
@@ -1231,74 +1250,46 @@ public class StreamLexer implements Lexer {
 
   private Token identifier() {
     readFrom();
-    eat();
-    // TODO(cushon): the style guide disallows non-ascii identifiers
-    while (Character.isJavaIdentifierPart(ch)) {
-      if (ch == ASCII_SUB && reader.done()) {
-        break;
-      }
-      eat();
-    }
-    return makeIdent(stringValue());
+    ch = reader.eatIdentifier();
+    return makeIdent(reader.source().source(), readFrom, reader.position());
   }
 
-  private static Token makeIdent(String s) {
-    return switch (s) {
-      case "abstract" -> Token.ABSTRACT;
-      case "assert" -> Token.ASSERT;
-      case "boolean" -> Token.BOOLEAN;
-      case "break" -> Token.BREAK;
-      case "byte" -> Token.BYTE;
-      case "case" -> Token.CASE;
-      case "catch" -> Token.CATCH;
-      case "char" -> Token.CHAR;
-      case "class" -> Token.CLASS;
-      case "const" -> Token.CONST;
-      case "continue" -> Token.CONTINUE;
-      case "default" -> Token.DEFAULT;
-      case "do" -> Token.DO;
-      case "double" -> Token.DOUBLE;
-      case "else" -> Token.ELSE;
-      case "enum" -> Token.ENUM;
-      case "extends" -> Token.EXTENDS;
-      case "final" -> Token.FINAL;
-      case "finally" -> Token.FINALLY;
-      case "float" -> Token.FLOAT;
-      case "for" -> Token.FOR;
-      case "goto" -> Token.GOTO;
-      case "if" -> Token.IF;
-      case "implements" -> Token.IMPLEMENTS;
-      case "import" -> Token.IMPORT;
-      case "instanceof" -> Token.INSTANCEOF;
-      case "int" -> Token.INT;
-      case "interface" -> Token.INTERFACE;
-      case "long" -> Token.LONG;
-      case "native" -> Token.NATIVE;
-      case "new" -> Token.NEW;
-      case "package" -> Token.PACKAGE;
-      case "private" -> Token.PRIVATE;
-      case "protected" -> Token.PROTECTED;
-      case "public" -> Token.PUBLIC;
-      case "return" -> Token.RETURN;
-      case "short" -> Token.SHORT;
-      case "static" -> Token.STATIC;
-      case "strictfp" -> Token.STRICTFP;
-      case "super" -> Token.SUPER;
-      case "switch" -> Token.SWITCH;
-      case "synchronized" -> Token.SYNCHRONIZED;
-      case "this" -> Token.THIS;
-      case "throw" -> Token.THROW;
-      case "throws" -> Token.THROWS;
-      case "transient" -> Token.TRANSIENT;
-      case "try" -> Token.TRY;
-      case "void" -> Token.VOID;
-      case "volatile" -> Token.VOLATILE;
-      case "while" -> Token.WHILE;
-      case "true" -> Token.TRUE;
-      case "false" -> Token.FALSE;
-      case "null" -> Token.NULL;
-      default -> Token.IDENT;
-    };
+  /**
+   * Builds a lookup table of keyword tokens (including {@code true}, {@code false}, and {@code
+   * null}) indexed by {@code [length][firstChar - 'a']}. Non-keyword tokens in {@link Token} start
+   * with punctuation or {@code '<'} (e.g. {@code "<identifier>"}).
+   */
+  private static Token[][][] buildKeywords() {
+    Token[] empty = new Token[0];
+    Token[][][] keywords = new Token[MAX_KEYWORD_LENGTH + 1][26][];
+    for (Token[][] byChar : keywords) {
+      Arrays.fill(byChar, empty);
+    }
+    for (Token t : Token.values()) {
+      String v = t.toString();
+      if (Character.isJavaIdentifierStart(v.charAt(0))) {
+        int len = v.length();
+        int idx = v.charAt(0) - 'a';
+        Token[] prev = keywords[len][idx];
+        Token[] next = Arrays.copyOf(prev, prev.length + 1);
+        next[prev.length] = t;
+        keywords[len][idx] = next;
+      }
+    }
+    return keywords;
+  }
+
+  private static Token makeIdent(String s, int from, int to) {
+    int len = to - from;
+    char c0 = s.charAt(from);
+    if (len <= MAX_KEYWORD_LENGTH && c0 >= 'a' && c0 <= 'z') {
+      for (Token t : KEYWORDS[len][c0 - 'a']) {
+        if (s.startsWith(t.toString(), from)) {
+          return t;
+        }
+      }
+    }
+    return Token.IDENT;
   }
 
   private TurbineError inputError() {

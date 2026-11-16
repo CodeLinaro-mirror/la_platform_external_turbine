@@ -20,6 +20,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.TruthJUnit.assume;
 
 import com.google.common.truth.Expect;
+import com.google.turbine.cache.StringCache;
 import com.google.turbine.diag.SourceFile;
 import com.google.turbine.escape.SourceCodeEscapers;
 import com.google.turbine.model.TurbineJavadoc;
@@ -212,6 +213,7 @@ public class LexerTest {
                     + "    char       final      interface    static      void\n"
                     + "    class      finally    long         strictfp    volatile\n"
                     + "    const      float      native       super       while\n"
+                    + "    true       false      null\n"
                     + "=   >   <   !   ~   ?   :   ->\n"))
         .containsExactly(
             "ABSTRACT",
@@ -264,6 +266,9 @@ public class LexerTest {
             "NATIVE",
             "SUPER",
             "WHILE",
+            "TRUE",
+            "FALSE",
+            "NULL",
             "ASSIGN",
             "GT",
             "LT",
@@ -273,6 +278,12 @@ public class LexerTest {
             "COLON",
             "ARROW",
             "EOF");
+  }
+
+  @Test
+  public void nearMissKeywords() {
+    lexerComparisonTest(
+        "clas classes Class doo iff nul trues instanceOf synchronize synchronizeds \u0100");
   }
 
   @Test
@@ -350,7 +361,9 @@ public class LexerTest {
   }
 
   public static List<String> lex(String input) {
-    Lexer lexer = new StreamLexer(new UnicodeEscapePreprocessor(new SourceFile(null, input)));
+    Lexer lexer =
+        new StreamLexer(
+            new UnicodeEscapePreprocessor(new SourceFile(null, input)), new StringCache());
     List<String> tokens = new ArrayList<>();
     Token token;
     do {
@@ -410,7 +423,9 @@ public class LexerTest {
   @Test
   public void textBlockEOF() {
     String input = "\"\"\"\n\\";
-    Lexer lexer = new StreamLexer(new UnicodeEscapePreprocessor(new SourceFile(null, input)));
+    Lexer lexer =
+        new StreamLexer(
+            new UnicodeEscapePreprocessor(new SourceFile(null, input)), new StringCache());
     assertThat(lexer.next()).isEqualTo(Token.EOF);
     assertThat(lexer.stringValue()).isEqualTo("\\");
   }
@@ -540,5 +555,20 @@ public class LexerTest {
           .that(lex(input))
           .containsExactlyElementsIn(JavacLexer.javacLex(input));
     }
+  }
+
+  @Test
+  public void identifierAndWhitespaceSlowPaths() {
+    // identifiers containing or ending in characters handled by the slow path
+    lexerComparisonTest("ab\fcd");
+    lexerComparisonTest("a\uD800\uDC00b c");
+    lexerComparisonTest("x\u00e9y z");
+    lexerComparisonTest("abc");
+    // escaped and non-ASCII-fast-path whitespace
+    lexerComparisonTest("  \\u0020  x");
+    lexerComparisonTest(" \f x");
+    // Unicode escapes and identifier-ignorable characters are part of the raw identifier text
+    assertThat(lex("a\\u0062c d")).containsExactly("IDENT(a\\u0062c)", "IDENT(d)", "EOF");
+    assertThat(lex("a\u0000b c")).containsExactly("IDENT(a\u0000b)", "IDENT(c)", "EOF");
   }
 }

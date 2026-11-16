@@ -65,6 +65,8 @@ import com.google.turbine.tree.Tree.CompUnit;
 import com.google.turbine.tree.Tree.ModDecl;
 import com.google.turbine.type.Type;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import javax.annotation.processing.Processor;
 import javax.tools.Diagnostic;
@@ -164,14 +166,14 @@ public final class Binder {
         CompoundEnv.of(classpath.moduleEnv()).append(bootclasspath.moduleEnv());
 
     BindPackagesResult bindPackagesResult =
-        bindPackages(log, ienv, tli, preProcessedUnits, classPathEnv);
+        bindPackages(executor, log, ienv, tli, preProcessedUnits, classPathEnv);
 
     SimpleEnv<ClassSymbol, PackageSourceBoundClass> psenv = bindPackagesResult.classes;
     SimpleEnv<ModuleSymbol, PackageSourceBoundModule> modules = bindPackagesResult.modules;
 
     Env<ClassSymbol, SourceHeaderBoundClass> henv = bindHierarchy(log, syms, psenv, classPathEnv);
 
-    Env<ClassSymbol, SourceTypeBoundClass> tenv =
+    SimpleEnv<ClassSymbol, SourceTypeBoundClass> tenv =
         bindTypes(
             executor,
             log,
@@ -183,19 +185,13 @@ public final class Binder {
 
     tenv =
         constants(
-            syms,
-            tenv,
-            CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv),
-            log);
-    tenv =
-        disambiguateTypeAnnotations(
             executor,
             syms,
             tenv,
             CompoundEnv.<ClassSymbol, TypeBoundClass>of(classPathEnv).append(tenv),
             log);
     tenv =
-        canonicalizeTypes(
+        disambiguateAndCanonicalize(
             executor,
             syms,
             tenv,
@@ -210,13 +206,8 @@ public final class Binder {
             moduleVersion,
             log);
 
-    ImmutableMap.Builder<ClassSymbol, SourceTypeBoundClass> result = ImmutableMap.builder();
-    for (ClassSymbol sym : syms) {
-      result.put(sym, tenv.getNonNull(sym));
-    }
-
     return new BindingResult(
-        result.buildOrThrow(),
+        tenv.asMap(),
         boundModules,
         classPathEnv,
         tli,
@@ -255,6 +246,7 @@ public final class Binder {
 
   /** Initializes scopes for compilation unit and package-level lookup. */
   private static BindPackagesResult bindPackages(
+      TurbineExecutor executor,
       TurbineLog log,
       Env<ClassSymbol, SourceBoundClass> ienv,
       TopLevelIndex tli,
@@ -270,23 +262,15 @@ public final class Binder {
     } else {
       topLevel = topLevel.append(javaLang);
     }
-    for (PreprocessedCompUnit unit : units) {
-      Scope packageScope = tli.lookupPackage(unit.packageName());
-      CanonicalSymbolResolver importResolver =
-          new CanonicalResolver(
-              unit.packageName(),
-              CompoundEnv.<ClassSymbol, BoundClass>of(classPathEnv).append(ienv));
-      ImportScope importScope =
-          ImportIndex.create(log.withSource(unit.source()), importResolver, tli, unit.imports());
-      ImportScope wildImportScope = WildImportIndex.create(importResolver, tli, unit.imports());
-      MemberImportIndex memberImports =
-          new MemberImportIndex(unit.source(), importResolver, tli, unit.imports());
-      ImportScope scope = ImportScope.fromScope(topLevel).append(wildImportScope);
-      // Can be null if we're compiling a package-info.java for an empty package
-      if (packageScope != null) {
-        scope = scope.append(ImportScope.fromScope(packageScope));
-      }
-      scope = scope.append(importScope);
+    CompoundScope finalTopLevel = topLevel;
+    ImmutableList<PackageScopes> unitScopes =
+        executor.map(
+            units, unit -> bindPackageScopes(log, ienv, tli, unit, classPathEnv, finalTopLevel));
+    int size = units.size();
+    for (int i = 0; i < size; i++) {
+      PreprocessedCompUnit unit = units.get(i);
+      ImportScope scope = unitScopes.get(i).scope();
+      MemberImportIndex memberImports = unitScopes.get(i).memberImports();
       if (unit.module().isPresent()) {
         ModDecl module = unit.module().get();
         modules.put(
@@ -298,6 +282,33 @@ public final class Binder {
       }
     }
     return new BindPackagesResult(env.build(), modules.build());
+  }
+
+  private record PackageScopes(ImportScope scope, MemberImportIndex memberImports) {}
+
+  private static PackageScopes bindPackageScopes(
+      TurbineLog log,
+      Env<ClassSymbol, SourceBoundClass> ienv,
+      TopLevelIndex tli,
+      PreprocessedCompUnit unit,
+      CompoundEnv<ClassSymbol, BytecodeBoundClass> classPathEnv,
+      CompoundScope topLevel) {
+    Scope packageScope = tli.lookupPackage(unit.packageName());
+    CanonicalSymbolResolver importResolver =
+        new CanonicalResolver(
+            unit.packageName(), CompoundEnv.<ClassSymbol, BoundClass>of(classPathEnv).append(ienv));
+    ImportScope importScope =
+        ImportIndex.create(log.withSource(unit.source()), importResolver, tli, unit.imports());
+    ImportScope wildImportScope = WildImportIndex.create(importResolver, tli, unit.imports());
+    MemberImportIndex memberImports =
+        new MemberImportIndex(unit.source(), importResolver, tli, unit.imports());
+    ImportScope scope = ImportScope.fromScope(topLevel).append(wildImportScope);
+    // Can be null if we're compiling a package-info.java for an empty package
+    if (packageScope != null) {
+      scope = scope.append(ImportScope.fromScope(packageScope));
+    }
+    scope = scope.append(importScope);
+    return new PackageScopes(scope, memberImports);
   }
 
   /** Binds the type hierarchy (superclasses and interfaces) for all classes in the compilation. */
@@ -331,33 +342,38 @@ public final class Binder {
     return new SimpleEnv<>(builder.buildOrThrow());
   }
 
-  private static Env<ClassSymbol, SourceTypeBoundClass> bindTypes(
+  private static SimpleEnv<ClassSymbol, SourceTypeBoundClass> bindTypes(
       TurbineExecutor executor,
       TurbineLog log,
       ImmutableSet<ClassSymbol> syms,
       Env<ClassSymbol, SourceHeaderBoundClass> shenv,
       Env<ClassSymbol, HeaderBoundClass> henv) {
+    TypeBinder.ClassMemberScopes memberScopes = new TypeBinder.ClassMemberScopes(henv);
     return new SimpleEnv<>(
-        executor.toMap(
+        executor.toMapWithLog(
+            log,
             syms.asList(),
-            sym -> {
+            (sym, taskLog) -> {
               SourceHeaderBoundClass base = shenv.getNonNull(sym);
-              return TypeBinder.bind(log.withSource(base.source()), henv, sym, base);
+              return TypeBinder.bind(
+                  taskLog.withSource(base.source()), henv, memberScopes, sym, base);
             }));
   }
 
-  private static Env<ClassSymbol, SourceTypeBoundClass> canonicalizeTypes(
+  private static SimpleEnv<ClassSymbol, SourceTypeBoundClass> disambiguateAndCanonicalize(
       TurbineExecutor executor,
       ImmutableSet<ClassSymbol> syms,
       Env<ClassSymbol, SourceTypeBoundClass> stenv,
       Env<ClassSymbol, TypeBoundClass> tenv,
       TurbineLog log) {
     return new SimpleEnv<>(
-        executor.toMap(
+        executor.toMapWithLog(
+            log,
             syms.asList(),
-            sym -> {
-              SourceTypeBoundClass base = stenv.getNonNull(sym);
-              return CanonicalTypeBinder.bind(log.withSource(base.source()), sym, base, tenv);
+            (sym, taskLog) -> {
+              SourceTypeBoundClass base =
+                  DisambiguateTypeAnnotations.bind(stenv.getNonNull(sym), tenv, taskLog);
+              return CanonicalTypeBinder.bind(taskLog.withSource(base.source()), sym, base, tenv);
             }));
   }
 
@@ -399,17 +415,40 @@ public final class Binder {
     return bound.build();
   }
 
-  private static Env<ClassSymbol, SourceTypeBoundClass> constants(
+  private static SimpleEnv<ClassSymbol, SourceTypeBoundClass> constants(
+      TurbineExecutor executor,
       ImmutableSet<ClassSymbol> syms,
       Env<ClassSymbol, SourceTypeBoundClass> env,
       CompoundEnv<ClassSymbol, TypeBoundClass> baseEnv,
       TurbineLog log) {
 
+    // LazyEnv isn't thread-safe, so first evaluate all constant fields eagerly, and then bind the
+    // rest of each class in parallel using the evaluated values.
+    Env<FieldSymbol, Const.Value> constenv = evaluateConstants(syms, env, baseEnv, log);
+    return new SimpleEnv<>(
+        executor.toMapWithLog(
+            log,
+            syms.asList(),
+            (sym, taskLog) -> {
+              SourceTypeBoundClass base = env.getNonNull(sym);
+              return new ConstBinder(
+                      constenv, sym, baseEnv, base, taskLog.withSource(base.source()))
+                  .bind();
+            }));
+  }
+
+  /** Evaluates all constant fields in the compilation. */
+  private static SimpleEnv<FieldSymbol, Const.Value> evaluateConstants(
+      ImmutableSet<ClassSymbol> syms,
+      Env<ClassSymbol, SourceTypeBoundClass> env,
+      CompoundEnv<ClassSymbol, TypeBoundClass> baseEnv,
+      TurbineLog log) {
     // Prepare to lazily evaluate constant fields in each compilation unit.
     // The laziness is necessary since constant fields can reference other
     // constant fields.
     ImmutableMap.Builder<FieldSymbol, LazyEnv.Completer<FieldSymbol, Const.Value, Const.Value>>
         completers = ImmutableMap.builder();
+    List<FieldSymbol> constFields = new ArrayList<>();
     for (ClassSymbol sym : syms) {
       SourceTypeBoundClass info = env.getNonNull(sym);
       for (FieldInfo field : info.fields()) {
@@ -417,23 +456,23 @@ public final class Binder {
           continue;
         }
         completers.put(field.sym(), new LazyConstCompleter(sym, info, baseEnv, field, log));
+        constFields.add(field.sym());
       }
     }
-
-    // Create an environment of constant field values that combines
-    // lazily evaluated fields in the current compilation unit with
-    // constant fields in the classpath (which don't require evaluation).
-    Env<FieldSymbol, Const.Value> constenv =
-        new LazyEnv<>(
-            completers.buildOrThrow(), SimpleEnv.<FieldSymbol, Const.Value>builder().build());
-
-    SimpleEnv.Builder<ClassSymbol, SourceTypeBoundClass> builder = SimpleEnv.builder();
-    for (ClassSymbol sym : syms) {
-      SourceTypeBoundClass base = env.getNonNull(sym);
-      builder.put(
-          sym, new ConstBinder(constenv, sym, baseEnv, base, log.withSource(base.source())).bind());
+    if (constFields.isEmpty()) {
+      return new SimpleEnv<>(ImmutableMap.of());
     }
-    return builder.build();
+    Env<FieldSymbol, Const.Value> lazyConstEnv =
+        new LazyEnv<>(completers.buildOrThrow(), new SimpleEnv<>(ImmutableMap.of()));
+    ImmutableMap.Builder<FieldSymbol, Const.Value> constValues =
+        ImmutableMap.builderWithExpectedSize(constFields.size());
+    for (FieldSymbol fieldSym : constFields) {
+      Const.Value value = lazyConstEnv.get(fieldSym);
+      if (value != null) {
+        constValues.put(fieldSym, value);
+      }
+    }
+    return new SimpleEnv<>(constValues.buildOrThrow());
   }
 
   private static class LazyConstCompleter
@@ -513,22 +552,6 @@ public final class Binder {
         return false;
     }
     return true;
-  }
-
-  /**
-   * Disambiguate annotations on field types and method return types that could be declaration or
-   * type annotations.
-   */
-  private static Env<ClassSymbol, SourceTypeBoundClass> disambiguateTypeAnnotations(
-      TurbineExecutor executor,
-      ImmutableSet<ClassSymbol> syms,
-      Env<ClassSymbol, SourceTypeBoundClass> stenv,
-      Env<ClassSymbol, TypeBoundClass> tenv,
-      TurbineLog log) {
-    return new SimpleEnv<>(
-        executor.toMap(
-            syms.asList(),
-            sym -> DisambiguateTypeAnnotations.bind(stenv.getNonNull(sym), tenv, log)));
   }
 
   /**

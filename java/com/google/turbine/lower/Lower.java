@@ -119,22 +119,24 @@ public class Lower {
     CompoundEnv<ClassSymbol, TypeBoundClass> env =
         CompoundEnv.<ClassSymbol, TypeBoundClass>of(classpath).append(new SimpleEnv<>(units));
     ImmutableMap<ClassSymbol, SourceTypeBoundClass> pruned =
-        RemovePrivateMembers.process(env, units, options);
+        RemovePrivateMembers.process(executor, env, units, options);
     TurbineLog log = new TurbineLog();
 
     ImmutableList<TaskResult> classResults =
-        executor.map(
+        executor.mapWithLog(
+            log,
             pruned.entrySet().asList(),
-            entry -> {
+            (entry, taskLog) -> {
               ClassSymbol sym = entry.getKey();
               return lower(
-                  sym.binaryName(), entry.getValue(), env, sym, options, log, pruned.keySet());
+                  sym.binaryName(), entry.getValue(), env, sym, options, taskLog, pruned.keySet());
             });
 
     ImmutableList<TaskResult> moduleResults =
-        executor.map(
+        executor.mapWithLog(
+            log,
             modules,
-            module ->
+            (module, taskLog) ->
                 lower(
                     modules.size() == 1
                         // single module mode: the module-info.class file is at the root
@@ -145,7 +147,7 @@ public class Lower {
                     module,
                     env,
                     options,
-                    log));
+                    taskLog));
 
     ImmutableMap.Builder<String, byte[]> result = ImmutableMap.builder();
     ImmutableSet.Builder<ClassSymbol> symbols = ImmutableSet.builder();
@@ -425,6 +427,9 @@ public class Lower {
   }
 
   private ImmutableList<ParameterInfo> methodParameters(MethodInfo m) {
+    if (m.parameters().isEmpty()) {
+      return ImmutableList.of();
+    }
     ImmutableList.Builder<ParameterInfo> result = ImmutableList.builder();
     for (ParamInfo p : m.parameters()) {
       result.add(new ParameterInfo(p.name(), p.access() & PARAMETER_ACCESS_MASK));
@@ -639,6 +644,9 @@ public class Lower {
   }
 
   private ImmutableList<AnnotationInfo> lowerAnnotations(ImmutableList<AnnoInfo> annotations) {
+    if (annotations.isEmpty()) {
+      return ImmutableList.of();
+    }
     ImmutableList.Builder<AnnotationInfo> lowered = ImmutableList.builder();
     for (AnnoInfo annotation : annotations) {
       AnnotationInfo anno = lowerAnnotation(annotation);

@@ -30,6 +30,7 @@ import static com.google.turbine.tree.TurbineModifier.VARARGS;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
+import com.google.turbine.cache.StringCache;
 import com.google.turbine.diag.SourceFile;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.diag.TurbineError.ErrorKind;
@@ -73,6 +74,7 @@ import org.jspecify.annotations.Nullable;
 public class Parser {
 
   private static final String CTOR_NAME = "<init>";
+
   private final Lexer lexer;
 
   private Token token;
@@ -82,8 +84,22 @@ public class Parser {
     return parse(new SourceFile(null, source));
   }
 
+  /**
+   * Parses {@code source} with a new {@link StringCache}. Callers that parse multiple files should
+   * use {@link #parse(SourceFile, StringCache)} to share a cache between them.
+   */
   public static CompUnit parse(SourceFile source) {
-    return new Parser(new StreamLexer(new UnicodeEscapePreprocessor(source))).compilationUnit();
+    return parse(source, new StringCache());
+  }
+
+  /**
+   * Parses {@code source}, using {@code stringCache} to deduplicate identifiers. Sharing a cache
+   * across the files of a compilation avoids allocating a separate copy of each identifier for
+   * every file it appears in.
+   */
+  public static CompUnit parse(SourceFile source, StringCache stringCache) {
+    return new Parser(new StreamLexer(new UnicodeEscapePreprocessor(source), stringCache))
+        .compilationUnit();
   }
 
   private Parser(Lexer lexer) {
@@ -958,6 +974,19 @@ public class Parser {
 
   private ImmutableList<Tree> fieldRest(
       int pos, Modifiers modifiers, Tree.Type baseTy, Ident name) {
+    if (token == SEMI) {
+      // Fast path for a single field with no initializer, e.g. `int x;`.
+      eat(Token.SEMI);
+      return ImmutableList.of(
+          new VarDecl(
+              pos,
+              modifiers.access(),
+              modifiers.annos(),
+              baseTy,
+              name,
+              Optional.empty(),
+              modifiers.javadoc()));
+    }
     ImmutableList.Builder<Tree> result = ImmutableList.builder();
     VariableInitializerParser initializerParser = new VariableInitializerParser(token, lexer);
     List<List<SavedToken>> bits = initializerParser.parseInitializers();
