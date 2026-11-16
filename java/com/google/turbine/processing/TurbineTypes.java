@@ -811,7 +811,7 @@ public class TurbineTypes implements Types {
     return Erasure.erase(type, factory::getTyVarInfo);
   }
 
-  @Override
+  // @Override // Added in JDK 23
   @SuppressWarnings("unchecked")
   public <T extends TypeMirror> T stripAnnotations(T t) {
     return (T) factory.asTypeMirror(deannotate(asTurbineType(t)));
