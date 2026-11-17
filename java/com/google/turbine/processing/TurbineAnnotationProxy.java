@@ -218,7 +218,7 @@ class TurbineAnnotationProxy implements InvocationHandler {
         }
       } catch (MirroredTypesException // also MirroredTypeException, for single Class values
           | IncompleteAnnotationException
-          | ReflectiveOperationException unused) {
+          | ReflectiveOperationException _) {
         return false;
       }
     }

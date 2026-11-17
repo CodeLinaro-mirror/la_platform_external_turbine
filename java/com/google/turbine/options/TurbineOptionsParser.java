@@ -106,7 +106,7 @@ public final class TurbineOptionsParser {
             readOne(next, argumentDeque);
         case "--post_processor" -> {
           // accepted (and ignored) for compatibility with JavaBuilder command lines
-          var unused = readList(argumentDeque);
+          var _ = readList(argumentDeque);
         }
         case "--compress_jar" -> {
           // accepted (and ignored) for compatibility with JavaBuilder command lines

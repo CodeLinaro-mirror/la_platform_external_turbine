@@ -123,7 +123,7 @@ public class TurbineTypes implements Types {
     return factory.asTypeMirror(deannotate(factory.types().erasure(asTurbineType(typeMirror))));
   }
 
-  // @Override // Added in JDK 23
+  @Override
   @SuppressWarnings("unchecked")
   public <T extends TypeMirror> T stripAnnotations(T t) {
     return (T) factory.asTypeMirror(deannotate(asTurbineType(t)));
