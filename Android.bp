@@ -36,6 +36,8 @@ java_defaults {
     name: "turbine-defaults",
     defaults_visibility: ["//visibility:private"],
 
+    java_version: "25",
+
     srcs: [
         "java/**/*.java",
     ],
