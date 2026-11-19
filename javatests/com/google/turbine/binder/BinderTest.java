@@ -35,6 +35,7 @@ import com.google.turbine.binder.Binder.BindingResult;
 import com.google.turbine.binder.bound.SourceTypeBoundClass;
 import com.google.turbine.binder.bound.TypeBoundClass;
 import com.google.turbine.binder.sym.ClassSymbol;
+import com.google.turbine.diag.SourceFile;
 import com.google.turbine.diag.TurbineDiagnostic;
 import com.google.turbine.diag.TurbineError;
 import com.google.turbine.diag.TurbineLog;
@@ -356,6 +357,163 @@ public class BinderTest {
   }
 
   @Test
+  public void noJavaLangInnerClass() throws Exception {
+    ImmutableList<Tree.CompUnit> units =
+        ImmutableList.of(
+            parseLines(
+                """
+                class Outer<T> {
+                  class Inner {
+                    Inner self;
+                  }
+                  enum E {
+                    A;
+                    Inner x;
+                  }
+                  record R(Inner x) {}
+                }
+                """));
+    TurbineLog log = new TurbineLog();
+    Binder.BindingResult br =
+        Binder.bind(
+            TurbineExecutor.direct(),
+            log,
+            BindingRequest.builder()
+                .units(units)
+                .classpath(
+                    ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of()))
+                .bootclasspath(
+                    ClassPathBinder.bindClasspath(TurbineExecutor.direct(), ImmutableList.of()))
+                .build());
+    assertThat(log.diagnostics().stream().map(TurbineDiagnostic::kind))
+        .containsExactly(TurbineError.ErrorKind.NO_JAVA_LANG);
+    ImmutableMap<ClassSymbol, SourceTypeBoundClass> bound = br.units();
+
+    SourceTypeBoundClass inner = getBoundClass(bound, "Outer$Inner");
+    assertThat(inner.fields().stream().collect(onlyElement()).type().toString())
+        .isEqualTo("Outer<T>.Inner");
+    SourceTypeBoundClass e = getBoundClass(bound, "Outer$E");
+    assertThat(
+            e.fields().stream()
+                .filter(f -> f.name().equals("x"))
+                .collect(onlyElement())
+                .type()
+                .toString())
+        .isEqualTo("Outer<T>.Inner");
+    SourceTypeBoundClass r = getBoundClass(bound, "Outer$R");
+    assertThat(r.components().stream().collect(onlyElement()).type().toString())
+        .isEqualTo("Outer<T>.Inner");
+  }
+
+  @Test
+  public void canonicalizeMissingClassFile() throws Exception {
+    Map<String, byte[]> lib =
+        IntegrationTestSupport.runJavac(
+            ImmutableMap.of(
+                "A.java",
+                """
+                class A {
+                  class M {
+                    class I {}
+                  }
+                }
+                """,
+                "B.java",
+                """
+                class B extends A {
+                  class BM extends M {
+                    class BI extends I {}
+                  }
+                }
+                """),
+            ImmutableList.of());
+
+    // Omit A.class from the classpath.
+    Path libJar = temporaryFolder.newFile("lib.jar").toPath();
+    try (OutputStream os = Files.newOutputStream(libJar);
+        JarOutputStream jos = new JarOutputStream(os)) {
+      for (String name : ImmutableList.of("A$M", "A$M$I", "B", "B$BM", "B$BM$BI")) {
+        jos.putNextEntry(new JarEntry(name + ".class"));
+        jos.write(requireNonNull(lib.get(name)));
+      }
+    }
+
+    ImmutableList<Tree.CompUnit> units =
+        ImmutableList.of(
+            parseLines(
+                """
+                public class Test extends B {
+                  class M extends BM {
+                    I i;
+                  }
+                }
+                """));
+    TurbineLog log = new TurbineLog();
+    Binder.BindingResult br =
+        Binder.bind(
+            TurbineExecutor.direct(),
+            log,
+            BindingRequest.builder()
+                .units(units)
+                .classpath(
+                    ClassPathBinder.bindClasspath(
+                        TurbineExecutor.direct(), ImmutableList.of(libJar)))
+                .bootclasspath(TURBINE_BOOTCLASSPATH)
+                .build());
+    assertThat(log.diagnostics().stream().map(TurbineDiagnostic::kind))
+        .containsExactly(TurbineError.ErrorKind.CLASS_FILE_NOT_FOUND);
+    assertThat(br.units().keySet())
+        .containsExactly(new ClassSymbol("Test"), new ClassSymbol("Test$M"));
+  }
+
+  @Test
+  public void canonicalizeMissingSuperclass() throws Exception {
+    Map<String, byte[]> lib =
+        IntegrationTestSupport.runJavac(
+            ImmutableMap.of(
+                "Missing.java", "class Missing {}",
+                "Base.java", "class Base extends Missing {}"),
+            ImmutableList.of());
+
+    // Omit Missing.class from the classpath.
+    Path libJar = temporaryFolder.newFile("lib.jar").toPath();
+    try (OutputStream os = Files.newOutputStream(libJar);
+        JarOutputStream jos = new JarOutputStream(os)) {
+      jos.putNextEntry(new JarEntry("Base.class"));
+      jos.write(requireNonNull(lib.get("Base")));
+    }
+
+    ImmutableList<Tree.CompUnit> units =
+        ImmutableList.of(
+            parseLines(
+                """
+                class Outer {
+                  class Inner {}
+                  class Sub extends Base {
+                    Inner f;
+                  }
+                }
+                """));
+    TurbineLog log = new TurbineLog();
+    Binder.BindingResult br =
+        Binder.bind(
+            TurbineExecutor.direct(),
+            log,
+            BindingRequest.builder()
+                .units(units)
+                .classpath(
+                    ClassPathBinder.bindClasspath(
+                        TurbineExecutor.direct(), ImmutableList.of(libJar)))
+                .bootclasspath(TURBINE_BOOTCLASSPATH)
+                .build());
+    assertThat(log.diagnostics().stream().map(TurbineDiagnostic::kind))
+        .containsExactly(TurbineError.ErrorKind.CLASS_FILE_NOT_FOUND);
+    SourceTypeBoundClass sub = getBoundClass(br.units(), "Outer$Sub");
+    assertThat(sub.fields().stream().collect(onlyElement()).type().toString())
+        .isEqualTo("Outer.Inner");
+  }
+
+  @Test
   public void genericErrorType() throws Exception {
     ImmutableList<Tree.CompUnit> units =
         ImmutableList.of(
@@ -363,11 +521,13 @@ public class BinderTest {
                 "import java.lang.annotation.Target;",
                 "import java.lang.annotation.ElementType;",
                 "import java.util.List;",
+                "import java.util.Map;",
                 "public class Test {",
                 "  @Target(ElementType.TYPE_USE)",
                 "  @interface A {};",
                 "  No<@A Foo, Bar>.@A Such<Baz>.I f;",
                 "  List<String>.@A NoSuch<Foo, Bar>.I g;",
+                "  Map.Entry.Missing h;",
                 "}"));
     TurbineLog log = new TurbineLog();
     Binder.BindingResult br =
@@ -383,13 +543,27 @@ public class BinderTest {
     ImmutableMap<ClassSymbol, SourceTypeBoundClass> bound = br.units();
 
     SourceTypeBoundClass a = getBoundClass(bound, "Test");
-    ImmutableMap<String, String> fields =
-        a.fields().stream()
-            .collect(toImmutableMap(f -> f.name(), f -> printErrorTy((Type.ErrorTy) f.type())));
-    assertThat(fields)
+    ImmutableMap<String, Type.ErrorTy> errorTypes =
+        a.fields().stream().collect(toImmutableMap(f -> f.name(), f -> (Type.ErrorTy) f.type()));
+    assertThat(
+            errorTypes.entrySet().stream()
+                .collect(toImmutableMap(Map.Entry::getKey, e -> printErrorTy(e.getValue()))))
         .containsExactly(
             "f", "No<Foo,Bar>.@Test.A Such<Baz>.I",
-            "g", "List<java.lang.String>.@Test.A NoSuch<Foo,Bar>.I");
+            "g", "List<java.lang.String>.@Test.A NoSuch<Foo,Bar>.I",
+            "h", "Map.Map$Entry.Missing");
+    assertThat(errorTypes.get("f").classes().stream().map(Type.ErrorTy.SimpleErrorTy::sym))
+        .containsExactly(null, null, null)
+        .inOrder();
+    assertThat(errorTypes.get("g").classes().stream().map(Type.ErrorTy.SimpleErrorTy::sym))
+        .containsExactly(new ClassSymbol("java/util/List"), null, null)
+        .inOrder();
+    assertThat(errorTypes.get("h").classes().stream().map(Type.ErrorTy.SimpleErrorTy::sym))
+        .containsExactly(
+            new ClassSymbol("java/util/Map"), new ClassSymbol("java/util/Map$Entry"), null)
+        .inOrder();
+    assertThat(errorTypes.get("g").toString()).isEqualTo("List.NoSuch.I");
+    assertThat(errorTypes.get("h").toString()).isEqualTo("Map.Map$Entry.Missing");
   }
 
   @Test
@@ -560,6 +734,50 @@ public class BinderTest {
                   throw new AssertionError("info should not be called for top-level classes");
                 }))
         .isEqualTo("Outer");
+  }
+
+  @Test
+  public void duplicateTopLevelClassLogsAndContinues() throws Exception {
+    ImmutableList<Tree.CompUnit> units =
+        ImmutableList.of(
+            Parser.parse(
+                new SourceFile(
+                    "a/Foo.java",
+                    """
+                    package test.pkg;
+                    public class Foo {
+                      public static final int X = 1;
+                      public static class OnlyInFirst {}
+                    }
+                    """)),
+            Parser.parse(
+                new SourceFile(
+                    "b/Foo.java",
+                    """
+                    package test.pkg;
+                    public class Foo {
+                      public static final int X = 2;
+                      public static class OnlyInSecond {}
+                    }
+                    """)));
+
+    TurbineExecutor executor = TurbineExecutor.direct();
+    BindingRequest request = bindingRequest().units(units).build();
+    TurbineLog log = new TurbineLog();
+    BindingResult bound = Binder.bind(executor, log, request);
+    assertThat(log.diagnostics()).hasSize(1);
+    TurbineDiagnostic diagnostic = log.diagnostics().getFirst();
+    assertThat(diagnostic.kind()).isEqualTo(TurbineError.ErrorKind.DUPLICATE_DECLARATION);
+    assertThat(diagnostic.path()).hasValue("b/Foo.java");
+    assertThat(bound.units().keySet())
+        .containsExactly(
+            new ClassSymbol("test/pkg/Foo"), new ClassSymbol("test/pkg/Foo$OnlyInFirst"));
+    SourceTypeBoundClass foo = getBoundClass(bound.units(), "test/pkg/Foo");
+    assertThat(foo.source().path()).isEqualTo("a/Foo.java");
+    assertThat(foo.fields().stream().collect(onlyElement()).value().getValue()).isEqualTo(1);
+
+    TurbineError error = assertThrows(TurbineError.class, () -> Binder.bind(executor, request));
+    assertThat(error).hasMessageThat().contains("duplicate declaration of test.pkg.Foo");
   }
 
   private Tree.CompUnit parseLines(String... lines) {

@@ -9,12 +9,12 @@ third_party {
   last_upgrade_date {
     year: 2026
     month: 11
-    day: 15
+    day: 19
   }
   homepage: "https://github.com/google/turbine"
   identifier {
     type: "Git"
     value: "https://github.com/google/turbine"
-    version: "f1b761d374bfb63a57d0004559fdf37dc6e145e9"
+    version: "65587dd9b736c37e1f188aa8d11bae2a1f1bbe43"
   }
 }
